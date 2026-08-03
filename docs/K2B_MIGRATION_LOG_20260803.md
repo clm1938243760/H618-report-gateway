@@ -63,6 +63,25 @@ MUSB tracepoint 显示 `ep1 OUT` 的 4096 字节请求全部完成并正常 give
 不得运行时解绑 `musb-sunxi`；如开发实验留下异常枚举状态，应先停止主机 I/O，再重建
 configfs gadget 或重启板子。
 
+### Printer 实际报告闭环
+
+使用 Windows 真实打印队列和板端 `gadget-collector` 完成了 Printer 数据通道验证：
+
+1. Windows 当前枚举的 K2B USB Printer 端口为 `USB016`。
+2. 原测试队列仍绑定旧端口 `USB015`，表现为任务长期停留在
+   `Error, Printing, Retained`，板端收到 `0` 字节。
+3. 将同一队列改绑 `USB016` 后，发送 `158` 字节 RAW PostScript；Windows 任务正常
+   结束，板端保存为 `.prn`。
+4. `gadget-collector` 成功将该 PostScript 转换为 `2445` 字节有效 PDF。
+5. `/dev/g_printer0` 的状态在测试前后均为 `0x18`，即已选择、无错误、未缺纸；故障
+   原因不是 Printer 状态位，也不是 K2B 内核或采集程序。
+
+Windows 在 USB Gadget 模式、Function 组合或枚举实例变化后，可能分配新的
+`USB00x` 虚拟打印端口。出现“Windows 接受任务但板端没有数据”时，应先确认打印队列
+绑定的端口与当前 `USBPRINT` 设备一致，再排查板端。当前默认
+`printer.idle_complete_seconds=20`，因此小任务从首字节到封包约等待 20 秒；这是继承
+的任务边界策略，不是 H618 转换性能不足。
+
 ### USB-C OTG 角色修复
 
 原始 K2B V2 DTB 同时启用了共用 PHY0 的 MUSB peripheral、EHCI0 和 OHCI0。启动时

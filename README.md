@@ -11,6 +11,8 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 - 已在 K2B 实板和 Windows 主机验证 UDC、MSC、Printer、HID 与 HTTPS。
 - 已完成 Windows 写入真实 PDF、板端提取转换、队列处理和 Mock HTTP 上传闭环，
   `MacCode`、`MsgId`、`hospitalCode` 及两个 multipart 文件字段均通过校验。
+- 已完成 Windows RAW PostScript 到 `/dev/g_printer0`、PRN 保存和 PDF 转换的 Printer
+  真机闭环；模式切换后需确认 Windows 打印队列绑定当前 `USB00x` 端口。
 - 已增加 MSC/Printer 与 HID Keyboard/Mouse 的复合模式。
 - 已修复 K2B V2 Armbian USB0 Host/Peripheral 角色冲突并完成冷启动验收。
 - GhostPCL 和医疗设备兼容性仍需完成最终验收。

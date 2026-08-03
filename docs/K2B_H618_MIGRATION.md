@@ -125,6 +125,11 @@ ls -l /sys/class/udc
 - Windows 能创建 K2B USB Printer 端口；
 - PCL、PCL XL、PostScript 和 PDF 测试流能完整接收。
 
+Windows 可能在 Gadget 模式或 Function 组合变化后分配新的 `USB00x` 端口。若打印
+任务停留在错误/打印中，而 `/dev/g_printer0` 没有数据，应先在 Windows 中确认队列
+绑定的是当前 K2B `USBPRINT` 实例对应端口。本次实测旧队列绑定 `USB015` 时收到
+`0` 字节，改绑当前 `USB016` 后 RAW PostScript 正常到达板端并生成 PDF。
+
 ### 阶段 3.5：复合 HID 测试
 
 管理页面提供四种模式：
