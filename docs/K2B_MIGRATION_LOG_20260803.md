@@ -123,7 +123,14 @@ sudo reboot
 - PNG 转 PDF：通过
 - TXT 转 PDF：通过
 - PostScript 转 PDF：通过
-- PCL/PCL XL：等待 GhostPCL
+- PCL：GhostPDL 官方 `owl.pcl` 样本通过，板端直接转换约 `258 ms`
+- PCL XL：GhostPDL 官方 `fonts.pxl` 样本通过，板端直接转换约 `222 ms`
+- 网关 `PdfConverter`：上述 PCL/PCL XL 样本均通过，生成文件头为 `%PDF-`，并由
+  Ghostscript `nullpage` 完整解析
+
+GhostPDL 版本为 `10.07.1`，安装路径为 `/usr/local/bin/gpcl6`。本次仅获准用于
+当前 K2B 测试板内部测试，源码来源、哈希和许可证边界见
+[`GHOSTPDL_INTERNAL_TEST_20260803.md`](GHOSTPDL_INTERNAL_TEST_20260803.md)。
 
 ### 前端
 
@@ -141,14 +148,14 @@ sudo reboot
 - Windows 自动恢复 USB 打印支持、HID Keyboard 和 HID Mouse。
 - `https://192.168.20.144:8443/health` 返回 `ok=true`。
 - `k2b_acceptance.sh --require-host --require-enabled` 结果为
-  `failures=0 warnings=2`。
+  `failures=0 warnings=0`。
 
 ## 仍需完成
 
 1. 在 HID 复合模式发送业务级键盘和鼠标测试报告。
-2. 录入正式设备编码、检查医生、检查医生编码和上传服务地址。
-3. 安装 GhostPCL 后验证 PCL 与 PCL XL 转换。
-4. 接入正式医院上传接口，继续验证失败重试和去重策略。
+2. 使用最终生产参数复核设备编码、检查医生、检查医生编码和上传服务地址。
+3. 接入正式医院上传接口，继续验证失败重试和去重策略。
+4. 使用医疗设备现场产生的 PCL/PCL XL 报告做兼容性与压力测试。
 
 最终执行：
 
@@ -157,4 +164,4 @@ sudo /opt/gadget-msc-printer/scripts/k2b_acceptance.sh \
   --require-host --require-enabled
 ```
 
-结果为 `failures=0`。现有两项警告对应尚未录入的业务配置和尚未安装的 GhostPCL。
+结果为 `failures=0 warnings=0`。

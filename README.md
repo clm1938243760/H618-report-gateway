@@ -15,7 +15,8 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
   真机闭环；模式切换后需确认 Windows 打印队列绑定当前 `USB00x` 端口。
 - 已增加 MSC/Printer 与 HID Keyboard/Mouse 的复合模式。
 - 已修复 K2B V2 Armbian USB0 Host/Peripheral 角色冲突并完成冷启动验收。
-- GhostPCL 和医疗设备兼容性仍需完成最终验收。
+- GhostPDL 10.07.1 已在当前 K2B 测试板编译安装，PCL 和 PCL XL 官方样本及
+  网关 `PdfConverter` 均已完成转换验证；医疗设备兼容性仍需现场验收。
 
 迁移进度和上板顺序见
 [docs/K2B_H618_MIGRATION.md](docs/K2B_H618_MIGRATION.md)。
@@ -104,8 +105,10 @@ H618 芯片具有 USB OTG 不等于当前 Armbian 内核已经启用 USB Printer
 configfs function。Printer 能否创建 `/dev/g_printer0` 是本次迁移的首要门槛，
 必须实板验证，不能只依据芯片或开发板规格判断。
 
-PCL/PCL XL 转 PDF 还依赖 GhostPDL `gpcl6`。商业发布前需要确认 AGPL 或
-Artifex 商业许可。
+PCL/PCL XL 转 PDF 依赖 GhostPDL `gpcl6`。当前安装仅获准用于该 K2B 测试板的
+内部测试；商业发布前必须重新完成 AGPL、PCL/XL 字体 AFPL 或 Artifex 商业许可
+评审。安装和实测记录见
+[docs/GHOSTPDL_INTERNAL_TEST_20260803.md](docs/GHOSTPDL_INTERNAL_TEST_20260803.md)。
 
 ## 项目结构
 

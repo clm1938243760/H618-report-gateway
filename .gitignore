@@ -11,4 +11,5 @@ build/
 *.pdf
 *.log
 output/
+tmp/
 .playwright-cli/

@@ -180,12 +180,14 @@ sudo reboot
 
 ## 实板待完成项目
 
-- GhostPDL 在该 Armbian 版本上的依赖和转换耗时；
 - 医疗设备对四种 USB 模式的兼容性复测；
 - Wi-Fi 固件、时钟同步和 eMMC 长时间写入稳定性。
 
 Windows 已实测 `msc_hid` 和 `printer_hid` 枚举，MSC 真实 PDF 写入和上传闭环也已
 通过；其余内核、UDC、Printer 和基础转换能力已在 `192.168.20.144` 实测通过。
+GhostPDL 10.07.1 已在测试板编译安装，官方 PCL/PCL XL 样本的直接转换和网关
+`PdfConverter` 转换均通过，详情见
+[`GHOSTPDL_INTERNAL_TEST_20260803.md`](GHOSTPDL_INTERNAL_TEST_20260803.md)。
 
 ## 回退原则
 
