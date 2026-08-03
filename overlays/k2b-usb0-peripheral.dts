@@ -1,0 +1,32 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "kickpi,kickpi-k2b-v2", "allwinner,sun50i-h618";
+
+	/* USB0 is the USB-C OTG port. Keep its shared PHY on the MUSB path. */
+	fragment@0 {
+		target-path = "/soc/usb@5101000";
+
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@1 {
+		target-path = "/soc/usb@5101400";
+
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+		target-path = "/soc/usb@5100000";
+
+		__overlay__ {
+			status = "okay";
+			dr_mode = "peripheral";
+		};
+	};
+};

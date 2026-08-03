@@ -8,9 +8,12 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 - 已复制当前有效的 Python 后端、Vue 管理端和生产构建。
 - 已把固定 RK3566 UDC 改为单 UDC 自动识别。
 - 已把 USB Printer 描述符改为 KICKPI K2B。
-- 已在 K2B 实板验证 UDC、MSC、Printer、HTTPS 和常用报告转换。
+- 已在 K2B 实板和 Windows 主机验证 UDC、MSC、Printer、HID 与 HTTPS。
+- 已完成 Windows 写入真实 PDF、板端提取转换、队列处理和 Mock HTTP 上传闭环，
+  `MacCode`、`MsgId`、`hospitalCode` 及两个 multipart 文件字段均通过校验。
 - 已增加 MSC/Printer 与 HID Keyboard/Mouse 的复合模式。
-- GhostPCL 和物理 USB 主机枚举仍需完成最终验收。
+- 已修复 K2B V2 Armbian USB0 Host/Peripheral 角色冲突并完成冷启动验收。
+- GhostPCL 和医疗设备兼容性仍需完成最终验收。
 
 迁移进度和上板顺序见
 [docs/K2B_H618_MIGRATION.md](docs/K2B_H618_MIGRATION.md)。
@@ -64,6 +67,10 @@ sudo bash scripts/k2b_preflight.sh | tee /tmp/k2b_preflight.txt
 sudo ENABLE_SERVICES=0 START_SERVICES=0 bash scripts/install.sh
 ```
 
+在 K2B 上，安装器默认自动编译并启用 `k2b-usb0-peripheral` 覆盖层。首次安装后如
+提示需要重启，应先执行 `sudo reboot`，再进行物理 USB 枚举。覆盖层自动安装可用
+`INSTALL_K2B_USB0_OVERLAY=0` 显式关闭，也可用 `=1` 强制启用。
+
 安装脚本会安装以下 systemd 单元；是否立即启动或设置开机自启分别由
 `START_SERVICES` 和 `ENABLE_SERVICES` 控制：
 
@@ -104,6 +111,7 @@ Artifex 商业许可。
 src/gadget_msc_printer/   采集、转换、上传、配置和 Web 后端
 portal/portal/            Vue 管理端及生产构建
 scripts/                  预检、USB gadget、安装和维护脚本
+overlays/                 K2B USB0 peripheral 设备树覆盖层
 systemd/                  板端服务单元
 tests/                    Python 回归测试
 docs/                     迁移、架构和产品资料

@@ -104,6 +104,23 @@ else
   fi
 fi
 
+if [[ -r /sys/class/extcon/extcon0/state ]]; then
+  extcon_state="$(cat /sys/class/extcon/extcon0/state)"
+  printf '%s\n' "$extcon_state" | sed 's/^/  extcon: /'
+  if grep -qx 'USB=1' <<<"$extcon_state" \
+    && grep -qx 'USB-HOST=1' <<<"$extcon_state"; then
+    warn "USB cable is detected but USB0 is also routed as Host; install the K2B USB0 peripheral overlay"
+  elif grep -qx 'USB-HOST=0' <<<"$extcon_state"; then
+    pass "USB0 is not routed to the Host controller"
+  fi
+fi
+
+for node in usb@5100000 usb@5101000 usb@5101400; do
+  status_path="/sys/firmware/devicetree/base/soc/${node}/status"
+  [[ -r "$status_path" ]] || continue
+  printf '  %s status=%s\n' "$node" "$(tr -d '\0' <"$status_path")"
+done
+
 section "Kernel USB Gadget capabilities"
 if grep -qw configfs /proc/filesystems 2>/dev/null; then
   pass "configfs filesystem is available"

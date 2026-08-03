@@ -134,6 +134,32 @@ else
   warn "USB host is not configured; UDC state is $UDC_STATE"
 fi
 
+if [[ -r /sys/class/extcon/extcon0/state ]]; then
+  EXTCON_STATE="$(cat /sys/class/extcon/extcon0/state)"
+  if grep -qx 'USB=1' <<<"$EXTCON_STATE" \
+    && grep -qx 'USB-HOST=0' <<<"$EXTCON_STATE"; then
+    pass "USB cable is routed to the peripheral controller"
+  elif grep -qx 'USB-HOST=1' <<<"$EXTCON_STATE"; then
+    fail "USB0 is incorrectly routed to the Host controller"
+  elif (( REQUIRE_HOST == 1 )); then
+    fail "USB peripheral role is not asserted"
+  else
+    warn "USB peripheral role is not currently asserted"
+  fi
+fi
+
+if [[ "$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)" == *"KICKPI K2B"* ]]; then
+  EHCI0_STATUS="$(tr -d '\0' </sys/firmware/devicetree/base/soc/usb@5101000/status 2>/dev/null || echo missing)"
+  OHCI0_STATUS="$(tr -d '\0' </sys/firmware/devicetree/base/soc/usb@5101400/status 2>/dev/null || echo missing)"
+  if [[ "$EHCI0_STATUS" == "disabled" && "$OHCI0_STATUS" == "disabled" ]]; then
+    pass "K2B USB0 Host branches are disabled"
+  elif (( REQUIRE_HOST == 1 )); then
+    fail "K2B USB0 Host branches are not disabled"
+  else
+    warn "K2B USB0 peripheral overlay is not active"
+  fi
+fi
+
 case "$MODE" in
   msc|msc_hid)
     GADGET="$MSC_GADGET"

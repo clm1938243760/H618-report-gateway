@@ -26,6 +26,8 @@
 3. USB Printer 描述符改为 KICKPI K2B/H618。
 4. 增加只读板端检查脚本 `scripts/k2b_preflight.sh`。
 5. 上传协议、三个业务 Header、XML、SQLite、PDF 和 Web 行为保持不变。
+6. 安装器会在 K2B 上自动安装 USB0 peripheral 覆盖层，避免共享 PHY0 被 EHCI0/
+   OHCI0 抢占。
 
 ## 第一次启动后的检查
 
@@ -57,6 +59,9 @@ CONFIG_USB_CONFIGFS_F_PRINTER=y/m
 ```bash
 sudo ENABLE_SERVICES=0 START_SERVICES=0 bash scripts/install.sh
 ```
+
+若安装器输出 `Reboot required`，先重启再继续。仅在已经由厂家 DTB 正确固定 USB-C
+设备角色时，才使用 `INSTALL_K2B_USB0_OVERLAY=0` 跳过自动覆盖层。
 
 单项验收后可以手动启动但暂不设置开机自启：
 
@@ -107,6 +112,10 @@ ls -l /sys/class/udc
 - 安全解绑并读取 FAT32 镜像；
 - 重建 gadget 后仍可再次枚举。
 
+本次实板已用 Windows 写入 `137636` 字节真实 PDF，并完成镜像提取、PDF 就绪、SQLite
+队列和 Mock HTTP 上传。后续医疗设备验收仍应使用 2-3MB 上限文件重复测试，并在每次
+底层参数实验后先干净重建 configfs gadget，避免沿用异常枚举状态。
+
 ### 阶段 3：独立 Printer 测试
 
 只运行 `setup_hp_printer_gadget.sh`，确认：
@@ -139,15 +148,39 @@ gadget-collector.service
 gadget-web.service
 ```
 
-最后测试 HTTPS 8443、XML 生成、测试上传、正式上传、失败重试和清理任务。
+最后测试 HTTPS 8443、XML 生成、测试上传、正式上传、失败重试和清理任务。本次已用
+真实 PDF 对 Mock 接口确认 `MacCode`、`MsgId`、`hospitalCode`、`Report` 和
+`ReportInfo`；正式医院接口仍需使用最终业务配置验收。
+
+### K2B V2 USB-C 设备角色
+
+当前 Armbian 6.12.47 DTB 会同时启用共用 USB PHY0 的 MUSB、EHCI0 和 OHCI0，可能
+导致 USB-C 物理已连接但 UDC 一直为 `not attached`。部署后先执行：
+
+```bash
+sudo /opt/gadget-msc-printer/scripts/k2b_usb0_peripheral_overlay.sh install
+sudo reboot
+```
+
+重启后必须满足：
+
+```text
+/sys/class/extcon/extcon0/state: USB=1, USB-HOST=0
+/sys/class/udc/musb-hdrc.4.auto/state: configured
+/sys/class/udc/musb-hdrc.4.auto/current_speed: high-speed
+```
+
+覆盖层只调整 USB-C 对应的 USB0，不影响其余 USB Host 控制器。不要通过 sysfs
+运行时解绑 `musb-sunxi`；该内核在驱动释放路径存在空指针异常。
 
 ## 实板待完成项目
 
 - GhostPDL 在该 Armbian 版本上的依赖和转换耗时；
-- Windows/医疗设备对四种 USB 模式的物理枚举；
+- 医疗设备对四种 USB 模式的兼容性复测；
 - Wi-Fi 固件、时钟同步和 eMMC 长时间写入稳定性。
 
-其余内核、UDC、MSC、Printer 和基础转换能力已在 `192.168.20.144` 实测通过。
+Windows 已实测 `msc_hid` 和 `printer_hid` 枚举，MSC 真实 PDF 写入和上传闭环也已
+通过；其余内核、UDC、Printer 和基础转换能力已在 `192.168.20.144` 实测通过。
 
 ## 回退原则
 

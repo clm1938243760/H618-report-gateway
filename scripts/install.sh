@@ -7,6 +7,7 @@ CONFIG_DIR=/etc/gadget-msc-printer
 DATA_DIR=/var/lib/gadget-msc-printer
 ENABLE_SERVICES="${ENABLE_SERVICES:-1}"
 START_SERVICES="${START_SERVICES:-1}"
+INSTALL_K2B_USB0_OVERLAY="${INSTALL_K2B_USB0_OVERLAY:-auto}"
 
 for value_name in ENABLE_SERVICES START_SERVICES; do
   value="${!value_name}"
@@ -15,6 +16,13 @@ for value_name in ENABLE_SERVICES START_SERVICES; do
     exit 2
   fi
 done
+
+if [[ "$INSTALL_K2B_USB0_OVERLAY" != "auto" \
+  && "$INSTALL_K2B_USB0_OVERLAY" != "0" \
+  && "$INSTALL_K2B_USB0_OVERLAY" != "1" ]]; then
+  echo "ERROR: INSTALL_K2B_USB0_OVERLAY must be auto, 0 or 1" >&2
+  exit 2
+fi
 
 if [[ ! -s "$SRC/portal/portal/dist/index.html" ]]; then
   echo "ERROR: Vue production bundle is missing: $SRC/portal/portal/dist/index.html" >&2
@@ -26,7 +34,7 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-yaml python3-pil python3-aiohttp \
-    dosfstools util-linux ghostscript openssl
+    dosfstools util-linux ghostscript openssl device-tree-compiler
 fi
 
 if ! command -v gpcl6 >/dev/null 2>&1 && ! command -v pcl6 >/dev/null 2>&1; then
@@ -41,6 +49,21 @@ mkdir -p "$DEST" "$CONFIG_DIR" "$DATA_DIR"
 cp -a "$SRC"/. "$DEST"/
 rm -rf "$DEST/portal/portal/node_modules"
 find "$DEST/scripts" -type f -name '*.sh' -exec chmod 755 {} +
+
+K2B_OVERLAY_SELECTED=0
+BOARD_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
+if [[ "$INSTALL_K2B_USB0_OVERLAY" == "1" \
+  || ( "$INSTALL_K2B_USB0_OVERLAY" == "auto" && "$BOARD_MODEL" == *"KICKPI K2B"* ) ]]; then
+  K2B_OVERLAY_SELECTED=1
+  if [[ -f /boot/armbianEnv.txt ]]; then
+    "$DEST/scripts/k2b_usb0_peripheral_overlay.sh" install
+  elif [[ "$INSTALL_K2B_USB0_OVERLAY" == "1" ]]; then
+    echo "ERROR: forced K2B USB0 overlay installation requires /boot/armbianEnv.txt" >&2
+    exit 1
+  else
+    echo "WARNING: K2B detected but /boot/armbianEnv.txt is missing; USB0 overlay was not installed." >&2
+  fi
+fi
 
 if [[ ! -s "$CONFIG_DIR/config.yaml" ]]; then
   install -m 0640 "$DEST/config.example.yaml" "$CONFIG_DIR/config.yaml"
@@ -110,3 +133,9 @@ echo "Configuration: https://$(hostname -I | awk '{print $1}'):8443"
 echo "Web account is configured in $CONFIG_DIR/config.yaml"
 echo "Service enable requested: $ENABLE_SERVICES"
 echo "Service start requested: $START_SERVICES"
+echo "K2B USB0 overlay selection: $INSTALL_K2B_USB0_OVERLAY"
+if [[ "$K2B_OVERLAY_SELECTED" == "1" \
+  && -r /sys/firmware/devicetree/base/soc/usb@5101000/status \
+  && "$(tr -d '\0' </sys/firmware/devicetree/base/soc/usb@5101000/status)" != "disabled" ]]; then
+  echo "Reboot required before the K2B USB-C port enumerates as a gadget."
+fi
