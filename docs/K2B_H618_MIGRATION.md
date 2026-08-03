@@ -64,6 +64,25 @@ sudo ENABLE_SERVICES=0 START_SERVICES=0 bash scripts/install.sh
 sudo ENABLE_SERVICES=0 START_SERVICES=1 bash scripts/install.sh
 ```
 
+运行中的只读验收：
+
+```bash
+sudo /opt/gadget-msc-printer/scripts/k2b_acceptance.sh
+```
+
+接入 USB 主机后，将主机枚举作为强制门槛：
+
+```bash
+sudo /opt/gadget-msc-printer/scripts/k2b_acceptance.sh --require-host
+```
+
+最终启用开机自启后，同时检查主机枚举和服务 enable 状态：
+
+```bash
+sudo /opt/gadget-msc-printer/scripts/k2b_acceptance.sh \
+  --require-host --require-enabled
+```
+
 只有全部功能验收通过后，才使用默认值完成开机自启配置。
 
 ### 阶段 1：系统与接口基线
