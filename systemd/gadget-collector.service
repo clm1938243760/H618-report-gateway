@@ -1,0 +1,15 @@
+[Unit]
+Description=KICKPI K2B MSC or Printer report collector
+After=gadget-mode.service
+Requires=gadget-mode.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gadget-msc-printer
+Environment=PYTHONPATH=/opt/gadget-msc-printer/src
+ExecStart=/opt/gadget-msc-printer/.venv/bin/python -m gadget_msc_printer.main --config /etc/gadget-msc-printer/config.yaml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

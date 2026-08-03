@@ -1,0 +1,28 @@
+$color-gray: #000;
+$color-blue: #0097e9;
+$color-dark: #f7f8fa;
+
+// sidebar
+$menuText: #bfcbd9;
+$menuActiveText: #0097e9;
+$subMenuActiveText: #f4f4f5;
+
+$menuBg: #fff;
+$menuHover: #ebf7fe;
+
+$subMenuBg: #fff;
+$subMenuHover: #ebf7fe;
+
+$sideBarWidth: 180px;
+
+$appHeaderHeight: 56px;
+$sideMenuWidth: 180px;
+// 管理端面包屑高度
+$breadcrumbHeight: 44px;
+// 管理端主内容高度
+$adminContentHeight: calc(100vh - #{$appHeaderHeight} - #{$breadcrumbHeight});
+// 组件 TemplateView 高度
+$templateViewHeight: calc(100vh - 130px);
+
+$MainBg: #f5f7f9;
+$cssNamespace: el;

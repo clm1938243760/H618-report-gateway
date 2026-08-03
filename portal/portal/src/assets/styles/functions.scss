@@ -1,0 +1,15 @@
+@use "./variables.scss" as *;
+
+@function getCssVar2($args...) {
+  @return var(#{joinVarName2($args)});
+}
+
+@function joinVarName2($list) {
+  $name: "--" + $cssNamespace;
+  @each $item in $list {
+    @if $item != "" {
+      $name: $name + "-" + $item;
+    }
+  }
+  @return $name;
+}

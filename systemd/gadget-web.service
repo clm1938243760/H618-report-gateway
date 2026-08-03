@@ -1,0 +1,15 @@
+[Unit]
+Description=KICKPI K2B report gateway HTTPS configuration and upload service
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gadget-msc-printer
+Environment=PYTHONPATH=/opt/gadget-msc-printer/src
+ExecStart=/opt/gadget-msc-printer/.venv/bin/python -m gadget_msc_printer.web_main --config /etc/gadget-msc-printer/config.yaml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

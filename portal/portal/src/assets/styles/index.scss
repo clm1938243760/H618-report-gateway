@@ -1,0 +1,33 @@
+@use "./reset.scss" as *;
+@use "./mixin.scss" as *;
+@use "./variables.scss" as *;
+@use "./other.scss" as *;
+@use "./functions.scss" as *;
+@use 'sass:map';
+
+
+$min-size: 0;
+$max-size: 500;
+$step-value: 10;
+// 全局映射记录已生成类名
+$generated-classes: () !default;
+@mixin generate-size-properties($property, $prefix) {
+  $current: $min-size;
+  
+  @while $current <= $max-size {
+    $class-name: #{$prefix}-#{$current};
+    
+    // 检查类名是否已生成
+    @if not map.has-key($generated-classes, $class-name) {
+      // 标记此类名已生成
+      $generated-classes: map.merge($generated-classes, ($class-name: true)) !global;
+      
+      .#{$class-name} {
+        #{$property}: #{$current}px;
+      }
+    }
+    $current: $current + $step-value;
+  }
+}
+
+@include generate-size-properties(width, "width");

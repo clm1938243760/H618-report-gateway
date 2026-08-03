@@ -1,0 +1,294 @@
+$bg: #2d3a4b;
+$dark_gray: #889aa4;
+$light_gray: #eee;
+
+.login-container {
+  // height: 100vh;
+  height: 100%;
+  width: 100%;
+  //background-color: #10297f;
+  // background-image: url("@/assets/images/login-bg.png");
+  background-repeat: no-repeat;
+  // background-size: 100% 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  position: relative;
+
+  // @media screen and (min-width: 1920px) and (max-width: 2560px) {
+  //   background-image: url("@/assets/images/login-bg.2x.png");
+  // }
+
+  // @media (max-width: 1920px) {
+  // background-image: url("@/assets/images/login-bg.png");
+  // background-size: auto 100%;
+  // }
+
+  .bg {
+    // flex: 1;
+    height: 100%;
+
+    // background-image: url("@/assets/images/login-bg.png");
+    // background-image: url("@/assets/images/entry-bg.png");
+    background-size: cover;
+    background-repeat: no-repeat;
+
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: #f1f8ff;
+    img {
+      height: 100%;
+      width: 100%;
+      display: block;
+      object-fit: cover;
+    }
+  }
+  .form-box {
+    // width: 856px;
+    // width: 44%;
+    // height: 100%;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+
+    position: absolute;
+    left: 60%;
+    top: 50%;
+    width: 22.5%;
+    // height: 41.666%;
+    background: #fff;
+    border-radius: 4px;
+    transform: translateY(-50%);
+    box-sizing: border-box;
+  }
+
+  .login-form {
+    // margin-bottom: 20vh;
+    // width: 560px;
+    // background-color: rgba(255, 255, 255, 0.2);
+    // border-radius: 5px;
+    // box-shadow: rgb(243, 233, 233, 0.7) 1px 1px 8px 1px;
+    // overflow: hidden;
+    // padding: 60px;
+    // width: 392px;
+    // width: 45.8%;
+    padding-left: 17.6%;
+    padding-right: 17.6%;
+    padding-top: 17.12%;
+    padding-bottom: 17.12%;
+    width: 100%;
+  }
+
+  // @media (max-width: 1660px) {
+  //   .form-box {
+  //     width: 600px;
+  //   }
+  //   .login-form {
+  //     width: 340px;
+  //   }
+  // }
+
+  .title-container {
+    .title {
+      // font-size: 30px;
+      // color: #eee;
+      // margin: 30px auto 60px auto;
+      // text-align: center;
+      // font-weight: bold;
+
+      height: 44px;
+      // font-family: Inter, "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial，sans-serif;
+      font-family: "Inter", "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "微软雅黑", Arial, sans-serif;
+      font-weight: 600;
+      font-size: 32px;
+      color: #272e3b;
+      line-height: 44px;
+      text-align: center;
+      font-style: normal;
+      text-transform: none;
+      // margin-bottom: 48px;
+      margin-bottom: 17%;
+      white-space: nowrap;
+    }
+  }
+
+  :deep(.#{$namespace}-form-item) {
+    // margin-bottom: 24px;
+    margin-bottom: 8.57%;
+  }
+}
+
+.svg-container {
+  padding-left: 6px;
+  color: $dark_gray;
+  text-align: center;
+  width: 30px;
+  position: relative;
+  top: 2px;
+}
+
+//错误提示信息
+.tip-message {
+  color: #e4393c;
+  height: 24px;
+  // margin-top: -12px;
+  font-size: 12px;
+  // margin-bottom: 6%;
+  margin-bottom: 8%;
+  margin-top: -5.6%;
+}
+
+//登录按钮
+.login-btn {
+  width: 100%;
+  height: 40px;
+  // margin-bottom: 50px;
+}
+
+.show-pwd {
+  width: 50px;
+  font-size: 16px;
+  color: $dark_gray;
+  cursor: pointer;
+  text-align: center;
+  text-align: center;
+  justify-content: center;
+  display: flex;
+}
+
+:deep(.#{$namespace}-input__wrapper) {
+  background: transparent;
+  // &.is-focus {
+  // box-shadow: 0 0 0 1px var(--el-input-hover-border-color) inset;
+  // }
+}
+
+:deep(.#{$namespace}-input__inner) {
+  background: transparent !important;
+  box-shadow: none;
+  -webkit-appearance: none;
+  // -webkit-text-fill-color: #41484b !important;
+  transition: background-color 2000s ease-in-out 0s;
+
+  /* 兼容旧浏览器 */
+
+  border: none;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+// :deep(.#{$namespace}-button--large) {
+//   background: #2e98f9 !important;
+// }
+
+.logo-img-box {
+  position: absolute;
+  left: 40px;
+  top: 40px;
+  z-index: 2;
+}
+.logoImg {
+  width: 145px;
+  height: auto;
+}
+
+@media (min-width: 1440px) {
+  .login-container {
+    .title-container {
+      .title {
+        font-size: 32px;
+      }
+    }
+
+    .form-box {
+      // width: 22.5%;
+      width: 432px;
+    }
+
+    .show-pwd {
+      width: 30px;
+    }
+  }
+}
+
+//
+@media (max-width: 1439px) and (min-width: 1280px) {
+  .login-container {
+    .title-container {
+      .title {
+        font-size: 32px;
+      }
+    }
+
+    .form-box {
+      width: 30%;
+    }
+
+    .show-pwd {
+      width: 30px;
+    }
+  }
+}
+
+/* 中等屏幕设备（平板） */
+@media (max-width: 1279px) and (min-width: 768px) {
+  .login-container {
+    .title-container {
+      .title {
+        font-size: 24px;
+      }
+    }
+
+    .form-box {
+      width: 33.75%;
+    }
+
+    .show-pwd {
+      width: 30px;
+    }
+  }
+}
+
+/* 小屏幕设备（手机） */
+@media (max-width: 767px) {
+  .login-container {
+    .logo-img-box {
+      top: 15px;
+      left: 15px;
+    }
+    .title-container {
+      .title {
+        font-size: 24px;
+      }
+    }
+
+    .bg {
+      background-image: linear-gradient(to bottom, #a5e0ff, #eef6fd, transparent, transparent, #eef6fd, #e7f4fc);
+      img {
+        display: none;
+      }
+    }
+
+    .login-form {
+      padding-left: 10%;
+      padding-right: 10%;
+      padding-top: 10%;
+      padding-bottom: 10%;
+      width: 100%;
+    }
+
+    .form-box {
+      width: 80%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    .show-pwd {
+      width: 30px;
+    }
+  }
+}

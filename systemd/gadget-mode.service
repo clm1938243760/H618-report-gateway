@@ -1,0 +1,13 @@
+[Unit]
+Description=KICKPI K2B selected USB gadget mode
+After=local-fs.target sys-kernel-config.mount
+Before=gadget-collector.service
+Conflicts=usb-gadget.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/gadget-msc-printer/scripts/apply_gadget_mode.sh --config /etc/gadget-msc-printer/config.yaml
+
+[Install]
+WantedBy=multi-user.target

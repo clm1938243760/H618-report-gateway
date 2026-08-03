@@ -1,0 +1,96 @@
+runtime:
+  data_dir: /var/lib/gadget-msc-printer
+  poll_interval_seconds: 2
+  log_level: INFO
+
+gadget:
+  mode: msc
+  udc_device: auto
+  msc_gadget_dir: /sys/kernel/config/usb_gadget/gmp_msc
+  printer_gadget_dir: /sys/kernel/config/usb_gadget/gmp_printer
+  apply_command: /opt/gadget-msc-printer/scripts/apply_gadget_mode.sh
+
+web:
+  enabled: true
+  host: 0.0.0.0
+  port: 8443
+  tls_cert: /etc/gadget-msc-printer/tls.crt
+  tls_key: /etc/gadget-msc-printer/tls.key
+  username: tejian01
+  password: "julei123#"
+  session_hours: 8
+  static_dir: /opt/gadget-msc-printer/portal/portal/dist
+
+device:
+  device_code: ""
+  exam_doct: ""
+  exam_doct_code: ""
+  report_info_path: /var/lib/gadget-msc-printer/device/ReportInfo.xml
+
+upload:
+  enabled: true
+  deduplicate: true
+  endpoint: http://192.168.112.139:9061/api/client/uploadOriginalReport
+  hospital_code: tejian01
+  state_db: /var/lib/gadget-msc-printer/state/jobs.sqlite3
+  poll_interval_seconds: 5
+  file_stable_seconds: 2
+  timeout_seconds: 30
+  retry_interval_seconds: 60
+  max_attempts: 3
+  user_agent: K2B-H618-Gadget-Gateway
+
+cleanup:
+  enabled: true
+  interval_hours: 24
+  report_retention_days: 30
+  log_retention_days: 14
+
+msc:
+  enabled: true
+  gadget_dir: /sys/kernel/config/usb_gadget/gmp_msc
+  udc_device: auto
+  image_path: /var/lib/gadget-msc-printer/msc/ums_shared.img
+  image_size_mb: 512
+  label: USB DISK
+  mount_dir: /var/lib/gadget-msc-printer/msc_mount
+  output_dir: /var/lib/gadget-msc-printer/msc_files
+  state_dir: /var/lib/gadget-msc-printer/state/msc
+  stable_seconds: 2
+  quiet_seconds: 2
+  copy_recursive: true
+  ignore_names:
+    - System Volume Information
+    - $RECYCLE.BIN
+  report_extensions:
+    - .pdf
+    - .bmp
+    - .jpg
+    - .jpeg
+    - .png
+    - .dat
+    - .txt
+    - .csv
+    - .xml
+
+printer:
+  enabled: true
+  device: /dev/g_printer0
+  output_dir: /var/lib/gadget-msc-printer/print_jobs
+  usb_vendor_id: "0x0525"
+  usb_product_id: "0xa4a8"
+  usb_manufacturer: KICKPI
+  usb_product: K2B USB Printer
+  usb_serial: K2B-H618-PRINTER-001
+  usb_pnp_string: "MFG:KICKPI;MDL:K2B USB Printer;DES:K2B USB Printer;CMD:PJL,PCL,PCLXL,POSTSCRIPT,RAW;CLS:PRINTER;"
+  idle_complete_seconds: 20
+  min_job_bytes: 128
+  chunk_size: 65536
+
+pdf:
+  enabled: true
+  output_dir: /var/lib/gadget-msc-printer/reports_pdf
+  ghostpcl:
+    - gpcl6
+    - pcl6
+  ps2pdf: ps2pdf

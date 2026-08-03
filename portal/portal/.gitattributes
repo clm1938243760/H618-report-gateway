@@ -1,0 +1,36 @@
+# Set the default behavior, in case people don't have core.autocrlf set.
+* text=auto
+
+# Explicitly declare text files you want to always be normalized and converted
+# to native line endings on checkout.
+#*.c text
+#*.h text
+*.vue              text eol=lf
+*.js               text eol=lf
+*.cjs              text eol=lf
+*.ts               text eol=lf
+*.tsx              text eol=lf
+*.json             text eol=lf
+*.css              text eol=lf
+*.less             text eol=lf
+*.scss             text eol=lf
+*.html             text eol=lf
+*.md               text eol=lf
+*.env              text eol=lf
+*.development      text eol=lf
+*.product          text eol=lf
+*.lock             text eol=lf
+
+
+# Declare files that will always have CRLF line endings on checkout.
+#*.sln text eol=crlf
+
+# Denote all files that are truly binary and should not be modified.
+*.png binary
+*.jpg binary
+*.svg binary
+*.jpeg binary
+*.pdf binary
+*.mp4 binary
+*.mp3 binary
+*.ico binary

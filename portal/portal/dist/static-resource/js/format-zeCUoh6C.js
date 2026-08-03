@@ -1,0 +1,1 @@
+import{Q as e}from"./index-CnjuC2gq.js";function i(r){const t=Number(r||0);if(!Number.isFinite(t)||t<=0)return"0 B";const o=["B","KB","MB","GB","TB"],n=Math.min(Math.floor(Math.log(t)/Math.log(1024)),o.length-1);return`${(t/1024**n).toFixed(n>=3?1:2)} ${o[n]}`}function m(r){const t=Number(r||0);return t?e(t*1e3).format("YYYY-MM-DD HH:mm:ss"):"-"}export{m as a,i as f};
