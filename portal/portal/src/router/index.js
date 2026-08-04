@@ -27,6 +27,24 @@ const routes = [
         meta: { title: "报告日志" }
       },
       {
+        path: "printer",
+        name: "printer",
+        component: () => import("@/views/gateway/PrinterConfigView.vue"),
+        meta: { title: "模拟打印配置" }
+      },
+      {
+        path: "msc",
+        name: "msc",
+        component: () => import("@/views/gateway/MscConfigView.vue"),
+        meta: { title: "模拟U盘配置" }
+      },
+      {
+        path: "wifi",
+        name: "wifi",
+        component: () => import("@/views/gateway/WifiConfigView.vue"),
+        meta: { title: "网络配置" }
+      },
+      {
         path: "maintenance",
         name: "maintenance",
         component: () => import("@/views/gateway/MaintenanceView.vue"),

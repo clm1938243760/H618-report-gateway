@@ -34,7 +34,8 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-yaml python3-pil python3-aiohttp \
-    dosfstools util-linux ghostscript openssl device-tree-compiler
+    dosfstools util-linux ghostscript openssl device-tree-compiler \
+    network-manager dnsmasq-base iptables
 fi
 
 if ! command -v gpcl6 >/dev/null 2>&1 && ! command -v pcl6 >/dev/null 2>&1; then
@@ -83,8 +84,40 @@ web.setdefault("username", "tejian01")
 web.setdefault("password", "julei123#")
 web.setdefault("session_hours", 8)
 web.setdefault("static_dir", "/opt/gadget-msc-printer/portal/portal/dist")
+if int(web.get("port", 8443)) == 8443:
+    web["port"] = 443
+web.setdefault("compatibility_port", 8443)
+hotspot = data.setdefault("hotspot", {})
+hotspot.setdefault("device", "wlan1")
+hotspot.setdefault("connection_name", "gmp-hotspot")
+hotspot.setdefault("ssid", "JVLEI-Gateway")
+hotspot.setdefault("password", "julei123#")
+hotspot.setdefault("autostart", False)
+hotspot.setdefault("idle_timeout_minutes", 30)
+if hotspot.get("address") in {None, "", "192.168.50.1/24"}:
+    hotspot["address"] = "192.168.0.1/24"
 upload = data.setdefault("upload", {})
 upload.setdefault("hospital_code", "tejian01")
+upload.setdefault("deduplicate", True)
+msc = data.setdefault("msc", {})
+msc.setdefault("deduplicate", bool(upload["deduplicate"]))
+msc.setdefault("auto_delete", False)
+msc.setdefault("restore_protected_files", True)
+msc.setdefault("protected_files", [])
+msc.setdefault("protected_seed_dir", "/var/lib/gadget-msc-printer/msc_protected")
+printer = data.setdefault("printer", {})
+printer.setdefault("driver_profile", "universal")
+printer["usb_vendor_id"] = "0x0525"
+printer["usb_product_id"] = "0xa4a8"
+printer["usb_manufacturer"] = "JVLEI"
+commands = {
+    "universal": "PJL,PCL,PCLXL,POSTSCRIPT,RAW",
+    "pcl": "PJL,PCL,PCLXL,RAW",
+    "postscript": "PJL,POSTSCRIPT,RAW",
+    "raw": "RAW",
+}.get(printer["driver_profile"], "PJL,PCL,PCLXL,POSTSCRIPT,RAW")
+product = str(printer.get("usb_product", "K2B USB Printer"))
+printer["usb_pnp_string"] = f"MFG:JVLEI;MDL:{product};DES:{product};CMD:{commands};CLS:PRINTER;"
 text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
 fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
 try:
@@ -129,7 +162,7 @@ if [[ "$START_SERVICES" == "1" ]]; then
 fi
 
 echo "Installed to $DEST"
-echo "Configuration: https://$(hostname -I | awk '{print $1}'):8443"
+echo "Configuration: https://$(hostname -I | awk '{print $1}')"
 echo "Web account is configured in $CONFIG_DIR/config.yaml"
 echo "Service enable requested: $ENABLE_SERVICES"
 echo "Service start requested: $START_SERVICES"

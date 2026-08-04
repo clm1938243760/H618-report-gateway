@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -11,6 +13,15 @@ import yaml
 
 
 GADGET_MODES = frozenset({"msc", "printer", "msc_hid", "printer_hid"})
+PRINTER_DRIVER_COMMANDS = {
+    "universal": "PJL,PCL,PCLXL,POSTSCRIPT,RAW",
+    "pcl": "PJL,PCL,PCLXL,RAW",
+    "postscript": "PJL,POSTSCRIPT,RAW",
+    "raw": "RAW",
+}
+FIXED_PRINTER_VENDOR_ID = "0x0525"
+FIXED_PRINTER_PRODUCT_ID = "0xa4a8"
+FIXED_PRINTER_MANUFACTURER = "JVLEI"
 
 
 def is_msc_mode(mode: str) -> bool:
@@ -19,6 +30,24 @@ def is_msc_mode(mode: str) -> bool:
 
 def has_hid(mode: str) -> bool:
     return mode in {"msc_hid", "printer_hid"}
+
+
+def build_printer_pnp_string(config: "PrinterConfig") -> str:
+    commands = PRINTER_DRIVER_COMMANDS[config.driver_profile]
+    return (
+        f"MFG:{FIXED_PRINTER_MANUFACTURER};"
+        f"MDL:{config.usb_product};"
+        f"DES:{config.usb_product};"
+        f"CMD:{commands};CLS:PRINTER;"
+    )
+
+
+def normalize_printer_identity(config: "PrinterConfig") -> None:
+    config.usb_vendor_id = FIXED_PRINTER_VENDOR_ID
+    config.usb_product_id = FIXED_PRINTER_PRODUCT_ID
+    config.usb_manufacturer = FIXED_PRINTER_MANUFACTURER
+    if config.driver_profile in PRINTER_DRIVER_COMMANDS:
+        config.usb_pnp_string = build_printer_pnp_string(config)
 
 
 @dataclass
@@ -41,13 +70,25 @@ class GadgetConfig:
 class WebConfig:
     enabled: bool = True
     host: str = "0.0.0.0"
-    port: int = 8443
+    port: int = 443
+    compatibility_port: int = 8443
     tls_cert: str = "/etc/gadget-msc-printer/tls.crt"
     tls_key: str = "/etc/gadget-msc-printer/tls.key"
     username: str = "tejian01"
     password: str = "julei123#"
     session_hours: int = 8
     static_dir: str = "/opt/gadget-msc-printer/portal/portal/dist"
+
+
+@dataclass
+class HotspotConfig:
+    device: str = "wlan1"
+    connection_name: str = "gmp-hotspot"
+    ssid: str = "JVLEI-Gateway"
+    password: str = "julei123#"
+    autostart: bool = False
+    idle_timeout_minutes: int = 30
+    address: str = "192.168.0.1/24"
 
 
 @dataclass
@@ -84,6 +125,11 @@ class CleanupConfig:
 @dataclass
 class MscConfig:
     enabled: bool = True
+    deduplicate: bool = True
+    auto_delete: bool = False
+    restore_protected_files: bool = True
+    protected_files: list[str] = field(default_factory=list)
+    protected_seed_dir: str = "/var/lib/gadget-msc-printer/msc_protected"
     gadget_dir: str = "/sys/kernel/config/usb_gadget/gmp_msc"
     udc_device: str = "auto"
     image_path: str = "/var/lib/gadget-msc-printer/msc/ums_shared.img"
@@ -104,14 +150,15 @@ class MscConfig:
 @dataclass
 class PrinterConfig:
     enabled: bool = True
+    driver_profile: str = "universal"
     device: str = "/dev/g_printer0"
     output_dir: str = "/var/lib/gadget-msc-printer/print_jobs"
-    usb_vendor_id: str = "0x0525"
-    usb_product_id: str = "0xa4a8"
-    usb_manufacturer: str = "KICKPI"
+    usb_vendor_id: str = FIXED_PRINTER_VENDOR_ID
+    usb_product_id: str = FIXED_PRINTER_PRODUCT_ID
+    usb_manufacturer: str = FIXED_PRINTER_MANUFACTURER
     usb_product: str = "K2B USB Printer"
     usb_serial: str = "K2B-H618-PRINTER-001"
-    usb_pnp_string: str = "MFG:KICKPI;MDL:K2B USB Printer;DES:K2B USB Printer;CMD:PJL,PCL,PCLXL,POSTSCRIPT,RAW;CLS:PRINTER;"
+    usb_pnp_string: str = "MFG:JVLEI;MDL:K2B USB Printer;DES:K2B USB Printer;CMD:PJL,PCL,PCLXL,POSTSCRIPT,RAW;CLS:PRINTER;"
     idle_complete_seconds: float = 20.0
     min_job_bytes: int = 128
     chunk_size: int = 65536
@@ -130,6 +177,7 @@ class AppConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     gadget: GadgetConfig = field(default_factory=GadgetConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    hotspot: HotspotConfig = field(default_factory=HotspotConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
     upload: UploadConfig = field(default_factory=UploadConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
@@ -176,6 +224,7 @@ def load_config(path: str | Path) -> AppConfig:
         runtime=_merge_dataclass(RuntimeConfig, data.get("runtime", {})),
         gadget=_merge_dataclass(GadgetConfig, data.get("gadget", {})),
         web=_merge_dataclass(WebConfig, data.get("web", {})),
+        hotspot=_merge_dataclass(HotspotConfig, data.get("hotspot", {})),
         device=_merge_dataclass(DeviceConfig, data.get("device", {})),
         upload=_merge_dataclass(UploadConfig, data.get("upload", {})),
         cleanup=_merge_dataclass(CleanupConfig, data.get("cleanup", {})),
@@ -183,6 +232,7 @@ def load_config(path: str | Path) -> AppConfig:
         printer=_merge_dataclass(PrinterConfig, data.get("printer", {})),
         pdf=_merge_dataclass(PdfConfig, data.get("pdf", {})),
     )
+    normalize_printer_identity(config.printer)
     validate_config(config)
     return config
 
@@ -192,8 +242,12 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("gadget.mode must be msc, printer, msc_hid, or printer_hid")
     if not 1 <= config.web.port <= 65535:
         raise ValueError("web.port must be between 1 and 65535")
-    if config.web.port != 8443:
-        raise ValueError("web.port must be 8443")
+    if config.web.port != 443:
+        raise ValueError("web.port must be 443")
+    if not 0 <= config.web.compatibility_port <= 65535:
+        raise ValueError("web.compatibility_port must be 0 or a valid TCP port")
+    if config.web.compatibility_port == config.web.port:
+        raise ValueError("web.compatibility_port must differ from web.port")
     if not config.web.username.strip():
         raise ValueError("web.username must not be empty")
     if len(config.web.username) > 128:
@@ -204,6 +258,24 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("web.password is too long")
     if not config.web.static_dir.strip():
         raise ValueError("web.static_dir must not be empty")
+    if not config.hotspot.ssid.strip() or len(config.hotspot.ssid.encode("utf-8")) > 32:
+        raise ValueError("hotspot.ssid must contain 1 to 32 bytes")
+    if any(char in config.hotspot.ssid for char in "\r\n"):
+        raise ValueError("hotspot.ssid contains invalid characters")
+    if not 8 <= len(config.hotspot.password) <= 63 or any(
+        char in config.hotspot.password for char in "\r\n"
+    ):
+        raise ValueError("hotspot.password must contain 8 to 63 characters")
+    for name, value in (
+        ("hotspot.device", config.hotspot.device),
+        ("hotspot.connection_name", config.hotspot.connection_name),
+    ):
+        if not value or len(value) > 32 or not all(char.isalnum() or char in "_.-" for char in value):
+            raise ValueError(f"{name} contains invalid characters")
+    if not 0 <= config.hotspot.idle_timeout_minutes <= 1440:
+        raise ValueError("hotspot.idle_timeout_minutes must be between 0 and 1440")
+    if config.hotspot.address != "192.168.0.1/24":
+        raise ValueError("hotspot.address must be 192.168.0.1/24")
     if config.upload.enabled:
         parsed = urlparse(config.upload.endpoint)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -223,6 +295,41 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("upload.max_attempts must be at least 1")
     if config.upload.retry_interval_seconds < 1:
         raise ValueError("upload.retry_interval_seconds must be at least 1")
+    if config.printer.driver_profile not in PRINTER_DRIVER_COMMANDS:
+        raise ValueError("printer.driver_profile is not supported")
+    if (
+        config.printer.usb_vendor_id != FIXED_PRINTER_VENDOR_ID
+        or config.printer.usb_product_id != FIXED_PRINTER_PRODUCT_ID
+        or config.printer.usb_manufacturer != FIXED_PRINTER_MANUFACTURER
+    ):
+        raise ValueError("printer USB identity is fixed by the product firmware")
+    for name, value in (
+        ("printer.usb_vendor_id", config.printer.usb_vendor_id),
+        ("printer.usb_product_id", config.printer.usb_product_id),
+    ):
+        if re.fullmatch(r"0x[0-9a-fA-F]{4}", value) is None:
+            raise ValueError(f"{name} must use the form 0x1234")
+    for name, value, maximum in (
+        ("printer.usb_manufacturer", config.printer.usb_manufacturer, 64),
+        ("printer.usb_product", config.printer.usb_product, 96),
+        ("printer.usb_serial", config.printer.usb_serial, 64),
+    ):
+        if not value.strip() or len(value) > maximum or any(char in value for char in "\r\n;"):
+            raise ValueError(f"{name} contains invalid text")
+    if not 0.5 <= config.printer.idle_complete_seconds <= 120:
+        raise ValueError("printer.idle_complete_seconds must be between 0.5 and 120")
+    if not 1 <= config.printer.min_job_bytes <= 10 * 1024 * 1024:
+        raise ValueError("printer.min_job_bytes must be between 1 and 10485760")
+    if not 32 <= config.msc.image_size_mb <= 4096:
+        raise ValueError("msc.image_size_mb must be between 32 and 4096")
+    if not config.msc.label.strip() or len(config.msc.label.encode("ascii", errors="ignore")) != len(config.msc.label):
+        raise ValueError("msc.label must contain ASCII characters")
+    if len(config.msc.label) > 11 or any(char in config.msc.label for char in "\"*+,./:;<=>?[\\]|"):
+        raise ValueError("msc.label must be a valid FAT label with at most 11 characters")
+    for value in config.msc.protected_files:
+        path = PurePosixPath(str(value).strip())
+        if not str(value).strip() or path.is_absolute() or ".." in path.parts:
+            raise ValueError("msc.protected_files must contain relative paths inside the U disk")
     if config.cleanup.interval_hours < 1:
         raise ValueError("cleanup.interval_hours must be at least 1")
     if config.cleanup.report_retention_days < 1:
@@ -232,6 +339,7 @@ def validate_config(config: AppConfig) -> None:
 
 
 def save_config(path: str | Path, config: AppConfig) -> None:
+    normalize_printer_identity(config.printer)
     validate_config(config)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

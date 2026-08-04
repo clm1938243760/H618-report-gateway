@@ -211,7 +211,7 @@ if [[ "$MODE" == *_hid ]]; then
 fi
 
 if command -v curl >/dev/null 2>&1 \
-  && curl -ksSf --max-time 5 https://127.0.0.1:8443/health 2>/dev/null \
+  && curl -ksSf --max-time 5 https://127.0.0.1/health 2>/dev/null \
     | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
   pass "HTTPS health endpoint is healthy"
 else

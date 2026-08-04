@@ -118,6 +118,14 @@
               <el-option label="停用" :value="false" />
             </el-select>
           </el-form-item>
+          <el-form-item label="重复文件去重">
+            <el-switch
+              v-model="form.deduplicate"
+              inline-prompt
+              active-text="开"
+              inactive-text="关"
+            />
+          </el-form-item>
           <el-form-item
             label="上传服务（IP:端口）"
             prop="endpoint_host"
@@ -142,6 +150,13 @@
         </div>
         <p class="section-note">
           实际上传地址：{{ endpointPreview || "请填写有效的 IP:端口" }}
+        </p>
+        <p class="section-note">
+          {{
+            form.deduplicate
+              ? "去重已开启：内容相同的报告只提取并上传一次，适合正式运行。"
+              : "去重已关闭：允许同一文件重复提取和上传，适合现场测试；SHA-256 完整性校验仍然启用。"
+          }}
         </p>
       </section>
     </el-form>
@@ -177,6 +192,7 @@ const form = reactive({
   exam_doct: "",
   exam_doct_code: "",
   upload_enabled: true,
+  deduplicate: true,
   endpoint_host: "",
   timeout_seconds: 30,
   retry_interval_seconds: 60,
@@ -274,11 +290,12 @@ async function saveConfig() {
   saving.value = true;
   try {
     const endpoint = buildUploadEndpoint(form.endpoint_host);
-    await api.put("/api/config", {
+    const { data } = await api.put("/api/config", {
       device_code: form.device_code,
       exam_doct: form.exam_doct,
       exam_doct_code: form.exam_doct_code,
       upload_enabled: form.upload_enabled,
+      deduplicate: form.deduplicate,
       endpoint,
       timeout_seconds: form.timeout_seconds,
       retry_interval_seconds: form.retry_interval_seconds,
@@ -288,7 +305,11 @@ async function saveConfig() {
       report_retention_days: form.report_retention_days,
       log_retention_days: form.log_retention_days
     });
-    ElMessage.success("配置已保存，ReportInfo.xml 已重新生成");
+    if (data.warning) {
+      ElMessage.warning("配置已保存，但采集服务重启失败，请检查服务状态");
+    } else {
+      ElMessage.success("配置已保存，ReportInfo.xml 已重新生成");
+    }
     await loadAll();
   } catch (error) {
     ElMessage.error(errorMessage(error, "保存配置失败"));

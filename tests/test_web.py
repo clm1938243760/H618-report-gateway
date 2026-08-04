@@ -4,15 +4,105 @@ import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
 from gadget_msc_printer.auth import SessionStore
-from gadget_msc_printer.config import AppConfig, save_config
+from gadget_msc_printer.config import AppConfig, load_config, save_config
 from gadget_msc_printer.maintenance import MaintenanceManager
 from gadget_msc_printer.report_info import ReportInfoManager
 from gadget_msc_printer.report_upload import ReportUploadWorker
 from gadget_msc_printer.web import ConfigWebApp
+
+
+class FakeWifiManager:
+    def __init__(self) -> None:
+        self.last_connect: tuple[object, ...] | None = None
+        self.current = {
+            "available": True,
+            "radio_enabled": True,
+            "devices": [{"device": "wlan0", "state": "connected", "connection": "Xiaomi14"}],
+            "saved_connections": [{"name": "Xiaomi14", "autoconnect": True}],
+            "device": "wlan0",
+            "connected": True,
+            "connection": "Xiaomi14",
+            "ssid": "Xiaomi14",
+            "addresses": ["10.119.184.41/24"],
+            "gateway": "10.119.184.80",
+            "signal": 75,
+            "security": "WPA2",
+            "frequency": 5180,
+            "channel": "36",
+            "autoconnect": True,
+        }
+        self.hotspot = {
+            "available": True,
+            "configured": False,
+            "active": False,
+            "device": "wlan1",
+            "ssid": "JVLEI-Gateway",
+            "address": "192.168.0.1/24",
+            "autostart": False,
+            "idle_timeout_minutes": 30,
+            "clients": 0,
+            "idle_seconds": 0,
+            "idle_remaining_seconds": None,
+        }
+
+    def status(self):
+        return dict(self.current)
+
+    def set_radio(self, enabled: bool):
+        self.current["radio_enabled"] = enabled
+        return self.status()
+
+    def scan(self, device: str = "", rescan: bool = True):
+        return [{"active": True, "ssid": "Xiaomi14", "signal": 75, "security": "WPA2", "frequency": 5180, "channel": "36"}]
+
+    def connect(self, ssid: str, password: str, device: str, hidden: bool, autoconnect: bool):
+        self.last_connect = (ssid, password, device, hidden, autoconnect)
+        self.current.update(ssid=ssid, connection=ssid, device=device, connected=True, autoconnect=autoconnect)
+        return self.status()
+
+    def disconnect(self, device: str):
+        self.current.update(connected=False, connection="", ssid="", addresses=[])
+        return self.status()
+
+    def forget(self, connection: str):
+        self.current["saved_connections"] = []
+        self.current.update(connected=False, connection="", ssid="", addresses=[])
+        return self.status()
+
+    def ethernet_status(self):
+        return {
+            "available": True,
+            "connected": True,
+            "device": "eth0",
+            "addresses": ["192.168.20.144/24"],
+            "gateway": "192.168.20.1",
+            "mac": "00:11:22:33:44:55",
+            "interfaces": [],
+        }
+
+    def hotspot_status(self, config):
+        self.hotspot.update(
+            ssid=config.ssid,
+            autostart=config.autostart,
+            idle_timeout_minutes=config.idle_timeout_minutes,
+        )
+        return dict(self.hotspot)
+
+    def configure_hotspot(self, config):
+        self.hotspot.update(configured=True)
+        return self.hotspot_status(config)
+
+    def set_hotspot(self, config, enabled: bool):
+        self.hotspot.update(configured=True, active=enabled)
+        return self.hotspot_status(config)
+
+    def enforce_hotspot_idle(self, config):
+        return {**self.hotspot_status(config), "auto_disabled": False}
 
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
@@ -58,6 +148,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             uploader.store,
             command_runner=lambda *args, **kwargs: CompletedProcess(args[0], 0, "vacuumed", ""),
         )
+        self.wifi = FakeWifiManager()
         self.web = ConfigWebApp(
             self.config_path,
             config,
@@ -65,6 +156,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             report_info,
             uploader,
             self.maintenance,
+            self.wifi,
         )
         self.client = TestClient(TestServer(self.web.app))
         await self.client.start_server()
@@ -86,6 +178,96 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_api_requires_login(self) -> None:
         response = await self.client.get("/api/config")
         self.assertEqual(response.status, 401)
+
+    async def test_wifi_status_scan_connect_disconnect_and_forget(self) -> None:
+        token, csrf = await self._login()
+        headers = {"Cookie": f"gmp_session={token}", "X-CSRF-Token": csrf}
+
+        response = await self.client.get("/api/wifi", headers=headers)
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(payload["ssid"], "Xiaomi14")
+        self.assertNotIn("password", payload)
+
+        response = await self.client.post("/api/wifi/scan", json={"device": "wlan0"}, headers=headers)
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(payload["networks"][0]["ssid"], "Xiaomi14")
+
+        response = await self.client.post(
+            "/api/wifi/connect",
+            json={"device": "wlan0", "ssid": "HospitalWiFi", "password": "test-password", "autoconnect": True},
+            headers=headers,
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(self.wifi.last_connect, ("HospitalWiFi", "test-password", "wlan0", False, True))
+        self.assertNotIn("test-password", str(payload))
+
+        response = await self.client.post("/api/wifi/disconnect", json={"device": "wlan0"}, headers=headers)
+        self.assertEqual(response.status, 200)
+        response = await self.client.post("/api/wifi/forget", json={"connection": "HospitalWiFi"}, headers=headers)
+        self.assertEqual(response.status, 200)
+        response = await self.client.post("/api/wifi/radio", json={"enabled": False}, headers=headers)
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertFalse(payload["radio_enabled"])
+
+    async def test_network_and_hotspot_configuration_do_not_expose_password(self) -> None:
+        token, csrf = await self._login()
+        headers = {"Cookie": f"gmp_session={token}", "X-CSRF-Token": csrf}
+
+        response = await self.client.get("/api/network", headers=headers)
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(payload["ethernet"]["addresses"], ["192.168.20.144/24"])
+        self.assertEqual(payload["ethernet"]["mac"], "00:11:22:33:44:55")
+        self.assertEqual(payload["hotspot"]["ssid"], "JVLEI-Gateway")
+        self.assertNotIn("password", str(payload))
+
+        response = await self.client.put(
+            "/api/hotspot/config",
+            headers=headers,
+            json={
+                "ssid": "JVLEI-Maintenance",
+                "password": "new-hotspot-password",
+                "autostart": True,
+                "idle_timeout_minutes": 45,
+            },
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertTrue(payload["configured"])
+        self.assertNotIn("new-hotspot-password", str(payload))
+        saved = load_config(self.config_path)
+        self.assertEqual(saved.hotspot.ssid, "JVLEI-Maintenance")
+        self.assertEqual(saved.hotspot.password, "new-hotspot-password")
+        self.assertTrue(saved.hotspot.autostart)
+        self.assertEqual(saved.hotspot.idle_timeout_minutes, 45)
+
+        response = await self.client.post(
+            "/api/hotspot/switch",
+            headers=headers,
+            json={"enabled": True},
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertTrue(payload["active"])
+
+    async def test_hotspot_monitor_restores_autostart_only_during_startup(self) -> None:
+        config = load_config(self.config_path)
+        config.hotspot.autostart = True
+        save_config(self.config_path, config)
+        self.wifi.hotspot["active"] = False
+
+        startup_complete = await self.web._monitor_hotspot_once(False)
+        self.assertTrue(startup_complete)
+        self.assertTrue(self.wifi.hotspot["active"])
+
+        self.wifi.hotspot["active"] = False
+        startup_complete = await self.web._monitor_hotspot_once(startup_complete)
+        self.assertTrue(startup_complete)
+        self.assertFalse(self.wifi.hotspot["active"])
 
     async def test_login_session_restore_and_static_frontend(self) -> None:
         response = await self.client.post(
@@ -203,6 +385,43 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(report_info_path.read_bytes(), original_xml)
 
+    async def test_deduplication_option_updates_upload_and_msc(self) -> None:
+        token, csrf = await self._login()
+        headers = {
+            "Cookie": f"gmp_session={token}",
+            "X-CSRF-Token": csrf,
+        }
+
+        with patch(
+            "gadget_msc_printer.web.subprocess.run",
+            return_value=CompletedProcess(["systemctl"], 0, "", ""),
+        ) as run:
+            response = await self.client.put(
+                "/api/config",
+                headers=headers,
+                json={"deduplicate": False},
+            )
+
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertTrue(payload["collector_restarted"])
+        self.assertEqual(payload["warning"], "")
+        run.assert_called_once()
+        saved_config = load_config(self.config_path)
+        self.assertFalse(saved_config.upload.deduplicate)
+        self.assertFalse(saved_config.msc.deduplicate)
+
+        response = await self.client.get("/api/config", headers=headers)
+        saved = await response.json()
+        self.assertFalse(saved["deduplicate"])
+
+        response = await self.client.put(
+            "/api/config",
+            headers=headers,
+            json={"deduplicate": "false"},
+        )
+        self.assertEqual(response.status, 400)
+
     async def test_authenticated_dashboard_uses_vue_bundle(self) -> None:
         token, _ = await self._login()
         headers = {"Cookie": f"gmp_session={token}"}
@@ -211,6 +430,136 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         dashboard = await response.text()
         self.assertIn("Vue gateway", dashboard)
+
+    async def test_printer_configuration_and_protocol_analysis(self) -> None:
+        token, csrf = await self._login()
+        headers = {
+            "Cookie": f"gmp_session={token}",
+            "X-CSRF-Token": csrf,
+        }
+        config = load_config(self.config_path)
+        print_dir = Path(config.printer.output_dir)
+        print_dir.mkdir(parents=True, exist_ok=True)
+        (print_dir / "sample.prn").write_bytes(
+            b"\x1b%-12345X@PJL ENTER LANGUAGE=PCLXL\r\n) HP-PCL XL;2;0;"
+        )
+
+        response = await self.client.put(
+            "/api/printer/config",
+            headers=headers,
+            json={
+                "driver_profile": "pcl",
+                "usb_vendor_id": "0xffff",
+                "usb_product_id": "0xffff",
+                "usb_manufacturer": "UNTRUSTED",
+                "usb_product": "K2B PCL Printer",
+                "usb_serial": "K2B-TEST-001",
+                "idle_complete_seconds": 5,
+                "min_job_bytes": 64,
+            },
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertFalse(payload["applied"])
+        self.assertNotIn("usb_pnp_string", payload)
+        saved = load_config(self.config_path)
+        self.assertEqual(saved.printer.usb_vendor_id, "0x0525")
+        self.assertEqual(saved.printer.usb_product_id, "0xa4a8")
+        self.assertEqual(saved.printer.usb_manufacturer, "JVLEI")
+        self.assertIn("MFG:JVLEI", saved.printer.usb_pnp_string)
+        self.assertIn("CMD:PJL,PCL,PCLXL,RAW", saved.printer.usb_pnp_string)
+
+        response = await self.client.get("/api/printer/config", headers=headers)
+        public_config = await response.json()
+        self.assertEqual(response.status, 200, public_config)
+        for hidden in ("usb_vendor_id", "usb_product_id", "usb_manufacturer", "usb_pnp_string"):
+            self.assertNotIn(hidden, public_config)
+
+        response = await self.client.get("/api/printer/analysis", headers=headers)
+        analysis = await response.json()
+        self.assertEqual(response.status, 200, analysis)
+        self.assertEqual(analysis["jobs"][0]["protocol"], "pclxl")
+        self.assertTrue(analysis["jobs"][0]["sha256"])
+        self.assertEqual(analysis["jobs"][0]["declared_language"], "PCLXL")
+
+        response = await self.client.get(
+            "/api/printer/files/sample.prn/download",
+            headers=headers,
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), (print_dir / "sample.prn").read_bytes())
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+
+    async def test_msc_configuration_and_explicit_rebuild(self) -> None:
+        token, csrf = await self._login()
+        headers = {
+            "Cookie": f"gmp_session={token}",
+            "X-CSRF-Token": csrf,
+        }
+        restart = AsyncMock()
+        with patch.object(self.web, "_restart_collector", new=restart):
+            response = await self.client.put(
+                "/api/msc/config",
+                headers=headers,
+                json={
+                    "image_size_mb": 256,
+                    "label": "TEST DISK",
+                    "auto_delete": True,
+                    "deduplicate": False,
+                    "restore_protected_files": True,
+                    "protected_files": ["DEVICE.INI", "Config/marker.dat"],
+                },
+            )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertTrue(payload["collector_restarted"])
+        self.assertTrue(payload["rebuild_required"])
+        restart.assert_awaited_once()
+        saved = load_config(self.config_path)
+        self.assertTrue(saved.msc.auto_delete)
+        self.assertFalse(saved.msc.deduplicate)
+        self.assertFalse(saved.upload.deduplicate)
+        self.assertEqual(saved.msc.protected_files, ["DEVICE.INI", "Config/marker.dat"])
+
+        response = await self.client.post(
+            "/api/msc/rebuild",
+            headers=headers,
+            json={"confirm": False},
+        )
+        self.assertEqual(response.status, 400)
+
+        command = AsyncMock(return_value=CompletedProcess(["mock"], 0, "rebuilt", ""))
+        with patch.object(self.web, "_run_command", new=command):
+            response = await self.client.post(
+                "/api/msc/rebuild",
+                headers=headers,
+                json={"confirm": True},
+            )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(command.await_count, 3)
+
+    async def test_report_download_is_authenticated_and_confined_to_report_directory(self) -> None:
+        token, _ = await self._login()
+        headers = {"Cookie": f"gmp_session={token}"}
+        root = Path(self.temp.name) / "data" / "reports_pdf"
+        root.mkdir(parents=True, exist_ok=True)
+        report = root / "download-test.pdf"
+        report.write_bytes(b"%PDF-1.4\ndownload\n%%EOF\n")
+        snapshot = self.web.report_info.snapshot()
+        job_id = self.uploader.store.enqueue(report, snapshot, "printer", deduplicate=False)
+        self.assertIsNotNone(job_id)
+
+        response = await self.client.get(f"/api/reports/{job_id}/download", headers=headers)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), report.read_bytes())
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+
+        outside = Path(self.temp.name) / "outside.pdf"
+        outside.write_bytes(b"outside")
+        outside_id = self.uploader.store.enqueue(outside, snapshot, "printer", deduplicate=False)
+        response = await self.client.get(f"/api/reports/{outside_id}/download", headers=headers)
+        self.assertEqual(response.status, 404)
 
     async def test_reports_api_supports_pagination_and_status_filters(self) -> None:
         token, _ = await self._login()

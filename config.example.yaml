@@ -13,13 +13,23 @@ gadget:
 web:
   enabled: true
   host: 0.0.0.0
-  port: 8443
+  port: 443
+  compatibility_port: 8443
   tls_cert: /etc/gadget-msc-printer/tls.crt
   tls_key: /etc/gadget-msc-printer/tls.key
   username: tejian01
   password: "julei123#"
   session_hours: 8
   static_dir: /opt/gadget-msc-printer/portal/portal/dist
+
+hotspot:
+  device: wlan1
+  connection_name: gmp-hotspot
+  ssid: JVLEI-Gateway
+  password: "julei123#"
+  autostart: false
+  idle_timeout_minutes: 30
+  address: 192.168.0.1/24
 
 device:
   device_code: ""
@@ -48,6 +58,11 @@ cleanup:
 
 msc:
   enabled: true
+  deduplicate: true
+  auto_delete: false
+  restore_protected_files: true
+  protected_files: []
+  protected_seed_dir: /var/lib/gadget-msc-printer/msc_protected
   gadget_dir: /sys/kernel/config/usb_gadget/gmp_msc
   udc_device: auto
   image_path: /var/lib/gadget-msc-printer/msc/ums_shared.img
@@ -75,14 +90,15 @@ msc:
 
 printer:
   enabled: true
+  driver_profile: universal
   device: /dev/g_printer0
   output_dir: /var/lib/gadget-msc-printer/print_jobs
   usb_vendor_id: "0x0525"
   usb_product_id: "0xa4a8"
-  usb_manufacturer: KICKPI
+  usb_manufacturer: JVLEI
   usb_product: K2B USB Printer
   usb_serial: K2B-H618-PRINTER-001
-  usb_pnp_string: "MFG:KICKPI;MDL:K2B USB Printer;DES:K2B USB Printer;CMD:PJL,PCL,PCLXL,POSTSCRIPT,RAW;CLS:PRINTER;"
+  usb_pnp_string: "MFG:JVLEI;MDL:K2B USB Printer;DES:K2B USB Printer;CMD:PJL,PCL,PCLXL,POSTSCRIPT,RAW;CLS:PRINTER;"
   idle_complete_seconds: 20
   min_job_bytes: 128
   chunk_size: 65536

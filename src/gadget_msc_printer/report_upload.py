@@ -191,6 +191,14 @@ class ReportJobStore:
             connection.commit()
             return cursor.rowcount > 0
 
+    def get(self, job_id: int) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM report_jobs WHERE id=?",
+                (int(job_id),),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def list_recent(self, limit: int = 50) -> list[dict[str, Any]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(

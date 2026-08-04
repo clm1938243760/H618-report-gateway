@@ -10,6 +10,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from .config import MscConfig, resolve_udc_device
 from .pdf_converter import PdfConverter
@@ -25,6 +26,7 @@ class MscMonitor:
         self.mount_dir = Path(config.mount_dir)
         self.output_dir = Path(config.output_dir)
         self.state_dir = Path(config.state_dir)
+        self.protected_seed_dir = Path(config.protected_seed_dir)
         self.records_file = self.state_dir / "files.jsonl"
         self.last_mtime_file = self.state_dir / "last_mtime"
         self._stop = asyncio.Event()
@@ -95,9 +97,14 @@ class MscMonitor:
         udc = self._unbind_gadget()
         self._detach_backing_file()
         loop = ""
+        writable = self.config.auto_delete or (
+            self.config.restore_protected_files and bool(self.config.protected_files)
+        )
         try:
-            loop = self._losetup()
-            self._mount_loop_ro(loop)
+            loop = self._losetup(read_only=not writable)
+            self._mount_loop(loop, read_only=not writable)
+            if writable:
+                self._synchronize_protected_files()
             copied = self._copy_new_files()
             LOGGER.info("msc extract complete copied=%d", copied)
         finally:
@@ -113,15 +120,26 @@ class MscMonitor:
         for source in self._iter_files():
             info = self._file_info(source)
             signature = info["signature"]
-            if signature in records:
+            if self.config.deduplicate and signature in records:
                 continue
             target = self._copy_file(source)
+            if self._sha256_file(target) != info["sha256"]:
+                target.unlink(missing_ok=True)
+                raise OSError(f"msc copy verification failed: {info['rel']}")
+            converted = None
+            if self.converter and target.suffix.lower() in {".pdf", ".bmp", ".jpg", ".jpeg", ".png", ".txt"}:
+                converted = self.converter.convert(target, "msc")
+            if self.config.auto_delete and self.converter is not None and converted is None:
+                target.unlink(missing_ok=True)
+                LOGGER.warning("msc source retained because conversion did not complete: %s", info["rel"])
+                continue
             self._append_record(info, target)
             records.add(signature)
             count += 1
             LOGGER.info("msc copied: %s -> %s", info["rel"], target)
-            if self.converter and target.suffix.lower() in {".pdf", ".bmp", ".jpg", ".jpeg", ".png", ".txt"}:
-                self.converter.convert(target, "msc")
+            if self.config.auto_delete and (self.converter is None or converted is not None):
+                source.unlink(missing_ok=True)
+                LOGGER.info("msc source removed after verified processing: %s", info["rel"])
         return count
 
     def _iter_files(self) -> list[Path]:
@@ -135,6 +153,8 @@ class MscMonitor:
             rel_parts = path.relative_to(self.mount_dir).parts
             if any(part in ignore for part in rel_parts):
                 continue
+            if self._is_protected(path):
+                continue
             if path.name.startswith("~$"):
                 continue
             if allowed and path.suffix.lower() not in allowed:
@@ -142,11 +162,36 @@ class MscMonitor:
             files.append(path)
         return files
 
+    def _is_protected(self, path: Path) -> bool:
+        rel = path.relative_to(self.mount_dir).as_posix()
+        for configured in self.config.protected_files:
+            protected = PurePosixPath(str(configured).strip()).as_posix().lstrip("./")
+            if rel == protected or rel.startswith(f"{protected}/"):
+                return True
+        return False
+
+    def _synchronize_protected_files(self) -> None:
+        self.protected_seed_dir.mkdir(parents=True, exist_ok=True)
+        for configured in self.config.protected_files:
+            rel = PurePosixPath(str(configured).strip())
+            source = self.mount_dir.joinpath(*rel.parts)
+            seed = self.protected_seed_dir.joinpath(*rel.parts)
+            if source.is_file():
+                if not seed.exists():
+                    seed.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, seed)
+                    LOGGER.info("msc protected file backed up: %s", rel.as_posix())
+                continue
+            if self.config.restore_protected_files and seed.is_file():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(seed, source)
+                LOGGER.info("msc protected file restored: %s", rel.as_posix())
+
     def _copy_file(self, source: Path) -> Path:
         rel = source.relative_to(self.mount_dir)
         target = self.output_dir / rel
         if target.exists():
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             target = target.with_name(f"{target.stem}_{stamp}{target.suffix}")
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
@@ -161,6 +206,13 @@ class MscMonitor:
                 digest.update(chunk)
         sha = digest.hexdigest()
         return {"rel": rel, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": sha, "signature": f"{rel}|{stat.st_size}|{sha}"}
+
+    def _sha256_file(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _load_records(self) -> set[str]:
         records: set[str] = set()
@@ -181,14 +233,22 @@ class MscMonitor:
         with self.records_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def _losetup(self) -> str:
-        result = subprocess.run(["losetup", "--show", "-fP", "-r", str(self.image_path)], check=True, stdout=subprocess.PIPE, text=True)
+    def _losetup(self, read_only: bool = True) -> str:
+        command = ["losetup", "--show", "-fP"]
+        if read_only:
+            command.append("-r")
+        command.append(str(self.image_path))
+        result = subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True)
         return result.stdout.strip()
 
     def _mount_loop_ro(self, loop: str) -> None:
+        self._mount_loop(loop, read_only=True)
+
+    def _mount_loop(self, loop: str, read_only: bool) -> None:
         part = f"{loop}p1"
         device = part if Path(part).exists() else loop
-        subprocess.run(["mount", "-o", "ro", device, str(self.mount_dir)], check=True)
+        mode = "ro" if read_only else "rw,sync"
+        subprocess.run(["mount", "-o", mode, device, str(self.mount_dir)], check=True)
 
     def _umount(self) -> None:
         if self._is_mounted():

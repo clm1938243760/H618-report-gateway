@@ -52,9 +52,24 @@ async def main_async() -> None:
     await runner.setup()
     site = web.TCPSite(runner, config.web.host, config.web.port, ssl_context=ssl_context)
     await site.start()
-    logging.getLogger(__name__).info("configuration web listening on https://%s:%d", config.web.host, config.web.port)
+    listening_ports = [config.web.port]
+    if config.web.compatibility_port:
+        compatibility_site = web.TCPSite(
+            runner,
+            config.web.host,
+            config.web.compatibility_port,
+            ssl_context=ssl_context,
+        )
+        await compatibility_site.start()
+        listening_ports.append(config.web.compatibility_port)
+    logging.getLogger(__name__).info(
+        "configuration web listening on https://%s ports %s",
+        config.web.host,
+        ", ".join(str(port) for port in listening_ports),
+    )
     upload_task = asyncio.create_task(uploader.run())
     maintenance_task = asyncio.create_task(maintenance.run())
+    hotspot_task = asyncio.create_task(application.monitor_hotspot())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -64,7 +79,8 @@ async def main_async() -> None:
     maintenance.stop()
     upload_task.cancel()
     maintenance_task.cancel()
-    await asyncio.gather(upload_task, maintenance_task, return_exceptions=True)
+    hotspot_task.cancel()
+    await asyncio.gather(upload_task, maintenance_task, hotspot_task, return_exceptions=True)
     await runner.cleanup()
 
 

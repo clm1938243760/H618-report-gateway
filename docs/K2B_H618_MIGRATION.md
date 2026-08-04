@@ -23,7 +23,7 @@
    - 只有一个 UDC 时自动使用；
    - 没有 UDC 时停止；
    - 多个 UDC 时停止并要求显式配置。
-3. USB Printer 描述符改为 KICKPI K2B/H618。
+3. USB Printer 厂商描述符固定为 JVLEI，设备名称和序列号可配置。
 4. 增加只读板端检查脚本 `scripts/k2b_preflight.sh`。
 5. 上传协议、三个业务 Header、XML、SQLite、PDF 和 Web 行为保持不变。
 6. 安装器会在 K2B 上自动安装 USB0 peripheral 覆盖层，避免共享 PHY0 被 EHCI0/

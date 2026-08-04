@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hmac
 import logging
 import shutil
@@ -9,14 +10,27 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from aiohttp import web
 
 from .auth import Session, SessionStore
-from .config import GADGET_MODES, AppConfig, load_config, resolve_udc_device, save_config, validate_config
+from .config import (
+    GADGET_MODES,
+    PRINTER_DRIVER_COMMANDS,
+    AppConfig,
+    build_printer_pnp_string,
+    is_msc_mode,
+    load_config,
+    resolve_udc_device,
+    save_config,
+    validate_config,
+)
 from .maintenance import MaintenanceManager
+from .prn_analyzer import analyze_recent_prn
 from .report_info import ReportInfoManager
 from .report_upload import ReportUploadWorker
+from .wifi_manager import WifiError, WifiManager
 
 LOGGER = logging.getLogger(__name__)
 COOKIE_NAME = "gmp_session"
@@ -35,6 +49,7 @@ class ConfigWebApp:
         report_info: ReportInfoManager,
         uploader: ReportUploadWorker,
         maintenance: MaintenanceManager,
+        wifi: WifiManager | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.config = config
@@ -42,6 +57,8 @@ class ConfigWebApp:
         self.report_info = report_info
         self.uploader = uploader
         self.maintenance = maintenance
+        self.wifi = wifi or WifiManager()
+        self.hotspot_lock = asyncio.Lock()
         self.login_failures: dict[str, list[float]] = {}
         self.app = web.Application(middlewares=[self.security_middleware])
         self.app.add_routes(
@@ -57,12 +74,29 @@ class ConfigWebApp:
                 web.get("/api/status", self.status),
                 web.get("/api/config", self.get_config),
                 web.put("/api/config", self.put_config),
+                web.get("/api/printer/config", self.get_printer_config),
+                web.put("/api/printer/config", self.put_printer_config),
+                web.get("/api/printer/analysis", self.printer_analysis),
+                web.get(r"/api/printer/files/{name:.+}/download", self.download_printer_file),
+                web.get("/api/msc/config", self.get_msc_config),
+                web.put("/api/msc/config", self.put_msc_config),
+                web.post("/api/msc/rebuild", self.rebuild_msc),
                 web.post("/api/gadget/switch", self.switch_gadget),
                 web.get("/api/reports", self.reports),
+                web.get(r"/api/reports/{job_id:\d+}/download", self.download_report),
                 web.post(r"/api/reports/{job_id:\d+}/retry", self.retry_report),
                 web.get("/api/maintenance", self.maintenance_status),
                 web.post("/api/maintenance/cleanup", self.cleanup_now),
                 web.post("/api/upload/test", self.test_upload),
+                web.get("/api/wifi", self.wifi_status),
+                web.post("/api/wifi/radio", self.wifi_radio),
+                web.post("/api/wifi/scan", self.wifi_scan),
+                web.post("/api/wifi/connect", self.wifi_connect),
+                web.post("/api/wifi/disconnect", self.wifi_disconnect),
+                web.post("/api/wifi/forget", self.wifi_forget),
+                web.get("/api/network", self.network_status),
+                web.put("/api/hotspot/config", self.put_hotspot_config),
+                web.post("/api/hotspot/switch", self.switch_hotspot),
             ]
         )
 
@@ -86,7 +120,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.4.0"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.1.0"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
@@ -221,6 +255,7 @@ class ConfigWebApp:
                 "exam_doct": config.device.exam_doct,
                 "exam_doct_code": config.device.exam_doct_code,
                 "upload_enabled": config.upload.enabled,
+                "deduplicate": config.upload.deduplicate and config.msc.deduplicate,
                 "endpoint": config.upload.endpoint,
                 "timeout_seconds": config.upload.timeout_seconds,
                 "retry_interval_seconds": config.upload.retry_interval_seconds,
@@ -235,10 +270,20 @@ class ConfigWebApp:
     async def put_config(self, request: web.Request) -> web.Response:
         payload = await request.json()
         config = load_config(self.config_path)
+        previous_msc_deduplicate = config.msc.deduplicate
         config.device.device_code = str(payload.get("device_code", config.device.device_code)).strip()
         config.device.exam_doct = str(payload.get("exam_doct", config.device.exam_doct)).strip()
         config.device.exam_doct_code = str(payload.get("exam_doct_code", config.device.exam_doct_code)).strip()
         config.upload.enabled = bool(payload.get("upload_enabled", config.upload.enabled))
+        if "deduplicate" in payload:
+            if not isinstance(payload["deduplicate"], bool):
+                return web.json_response(
+                    {"ok": False, "error": "deduplicate must be a boolean"},
+                    status=400,
+                )
+            deduplicate = payload["deduplicate"]
+            config.upload.deduplicate = deduplicate
+            config.msc.deduplicate = deduplicate
         config.upload.endpoint = str(payload.get("endpoint", config.upload.endpoint)).strip()
         config.upload.timeout_seconds = int(payload.get("timeout_seconds", config.upload.timeout_seconds))
         config.upload.retry_interval_seconds = int(
@@ -279,7 +324,289 @@ class ConfigWebApp:
             config.printer,
             config.msc,
         )
-        return web.json_response({"ok": True, "xml_sha256": snapshot.sha256})
+        collector_restarted = False
+        warning = ""
+        if previous_msc_deduplicate != config.msc.deduplicate and is_msc_mode(config.gadget.mode):
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["systemctl", "restart", "gadget-collector.service"],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=20,
+                )
+                collector_restarted = True
+            except (OSError, subprocess.SubprocessError) as exc:
+                warning = f"configuration saved, but collector restart failed: {exc}"
+                LOGGER.warning(warning)
+        return web.json_response(
+            {
+                "ok": True,
+                "xml_sha256": snapshot.sha256,
+                "collector_restarted": collector_restarted,
+                "warning": warning,
+            }
+        )
+
+    async def get_printer_config(self, request: web.Request) -> web.Response:
+        config = load_config(self.config_path)
+        labels = {
+            "universal": "通用 PCL/PCL XL/PostScript",
+            "pcl": "PCL/PCL XL",
+            "postscript": "PostScript",
+            "raw": "原始数据采集",
+        }
+        return web.json_response(
+            {
+                "driver_profile": config.printer.driver_profile,
+                "driver_profiles": [
+                    {
+                        "value": value,
+                        "label": labels[value],
+                        "commands": commands,
+                    }
+                    for value, commands in PRINTER_DRIVER_COMMANDS.items()
+                ],
+                "usb_product": config.printer.usb_product,
+                "usb_serial": config.printer.usb_serial,
+                "idle_complete_seconds": config.printer.idle_complete_seconds,
+                "min_job_bytes": config.printer.min_job_bytes,
+                "active": config.gadget.mode in {"printer", "printer_hid"},
+            }
+        )
+
+    async def put_printer_config(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        previous = load_config(self.config_path)
+        config = copy.deepcopy(previous)
+        config.printer.driver_profile = str(
+            payload.get("driver_profile", config.printer.driver_profile)
+        ).strip()
+        config.printer.usb_product = str(
+            payload.get("usb_product", config.printer.usb_product)
+        ).strip()
+        config.printer.usb_serial = str(
+            payload.get("usb_serial", config.printer.usb_serial)
+        ).strip()
+        try:
+            config.printer.idle_complete_seconds = float(
+                payload.get("idle_complete_seconds", config.printer.idle_complete_seconds)
+            )
+            config.printer.min_job_bytes = int(
+                payload.get("min_job_bytes", config.printer.min_job_bytes)
+            )
+            config.printer.usb_pnp_string = build_printer_pnp_string(config.printer)
+            validate_config(config)
+            await asyncio.to_thread(save_config, self.config_path, config)
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        applied = False
+        if config.gadget.mode in {"printer", "printer_hid"}:
+            try:
+                await self._reapply_gadget(config)
+                applied = True
+            except Exception as exc:
+                LOGGER.exception("printer gadget reconfiguration failed")
+                await asyncio.to_thread(save_config, self.config_path, previous)
+                try:
+                    await self._reapply_gadget(previous)
+                except Exception:
+                    LOGGER.exception("failed to restore previous printer gadget configuration")
+                return web.json_response(
+                    {"ok": False, "error": f"printer gadget apply failed: {exc}"},
+                    status=500,
+                )
+        self.config = config
+        return web.json_response(
+            {
+                "ok": True,
+                "applied": applied,
+            }
+        )
+
+    async def printer_analysis(self, request: web.Request) -> web.Response:
+        try:
+            limit = int(request.query.get("limit", "20"))
+        except ValueError:
+            return web.json_response({"ok": False, "error": "limit must be an integer"}, status=400)
+        config = load_config(self.config_path)
+        jobs = await asyncio.to_thread(analyze_recent_prn, config.printer.output_dir, limit)
+        return web.json_response({"ok": True, "jobs": jobs})
+
+    async def download_printer_file(self, request: web.Request) -> web.StreamResponse:
+        name = request.match_info["name"]
+        if Path(name).name != name or Path(name).suffix.lower() != ".prn":
+            raise web.HTTPNotFound(text="print job not found")
+        config = load_config(self.config_path)
+        root = Path(config.printer.output_dir).resolve()
+        path = (root / name).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            LOGGER.warning("blocked print job download outside output directory: %s", path)
+            raise web.HTTPNotFound(text="print job not found") from None
+        if not path.is_file():
+            raise web.HTTPNotFound(text="print job not found")
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(path.name)}",
+            "Cache-Control": "private, no-store",
+        }
+        return web.FileResponse(path, headers=headers)
+
+    async def get_msc_config(self, request: web.Request) -> web.Response:
+        config = load_config(self.config_path)
+        image = Path(config.msc.image_path)
+        actual_size = image.stat().st_size if image.is_file() else 0
+        configured_size = config.msc.image_size_mb * 1024 * 1024
+        protected = []
+        seed_root = Path(config.msc.protected_seed_dir)
+        for value in config.msc.protected_files:
+            protected.append(
+                {
+                    "path": value,
+                    "seeded": seed_root.joinpath(*Path(value).parts).is_file(),
+                }
+            )
+        return web.json_response(
+            {
+                "image_size_mb": config.msc.image_size_mb,
+                "actual_size_bytes": actual_size,
+                "label": config.msc.label,
+                "auto_delete": config.msc.auto_delete,
+                "deduplicate": config.msc.deduplicate and config.upload.deduplicate,
+                "restore_protected_files": config.msc.restore_protected_files,
+                "protected_files": list(config.msc.protected_files),
+                "protected_status": protected,
+                "rebuild_required": actual_size != configured_size,
+                "active": is_msc_mode(config.gadget.mode),
+            }
+        )
+
+    async def put_msc_config(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        config = load_config(self.config_path)
+        previous_runtime = (
+            config.msc.auto_delete,
+            config.msc.deduplicate,
+            config.msc.restore_protected_files,
+            tuple(config.msc.protected_files),
+        )
+        try:
+            config.msc.image_size_mb = int(payload.get("image_size_mb", config.msc.image_size_mb))
+            config.msc.label = str(payload.get("label", config.msc.label)).strip().upper()
+            for name in ("auto_delete", "deduplicate", "restore_protected_files"):
+                if name in payload and not isinstance(payload[name], bool):
+                    raise ValueError(f"{name} must be a boolean")
+            config.msc.auto_delete = payload.get("auto_delete", config.msc.auto_delete)
+            config.msc.restore_protected_files = payload.get(
+                "restore_protected_files", config.msc.restore_protected_files
+            )
+            if "deduplicate" in payload:
+                config.msc.deduplicate = payload["deduplicate"]
+                config.upload.deduplicate = payload["deduplicate"]
+            if "protected_files" in payload:
+                if not isinstance(payload["protected_files"], list):
+                    raise ValueError("protected_files must be a list")
+                values: list[str] = []
+                for raw in payload["protected_files"]:
+                    value = str(raw).strip().replace("\\", "/")
+                    if value and value not in values:
+                        values.append(value)
+                if len(values) > 50 or any(len(value) > 255 for value in values):
+                    raise ValueError("protected_files contains too many or overly long paths")
+                config.msc.protected_files = values
+            validate_config(config)
+            await asyncio.to_thread(save_config, self.config_path, config)
+        except (TypeError, ValueError, OSError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        current_runtime = (
+            config.msc.auto_delete,
+            config.msc.deduplicate,
+            config.msc.restore_protected_files,
+            tuple(config.msc.protected_files),
+        )
+        collector_restarted = False
+        if previous_runtime != current_runtime and is_msc_mode(config.gadget.mode):
+            try:
+                await self._restart_collector()
+                collector_restarted = True
+            except Exception as exc:
+                LOGGER.exception("msc collector restart failed")
+                return web.json_response(
+                    {"ok": False, "error": f"configuration saved, but collector restart failed: {exc}"},
+                    status=500,
+                )
+        self.config = config
+        self.uploader.update_config(config.upload)
+        self.maintenance.update_config(
+            config.cleanup,
+            config.runtime,
+            config.pdf,
+            config.printer,
+            config.msc,
+        )
+        image = Path(config.msc.image_path)
+        actual_size = image.stat().st_size if image.is_file() else 0
+        return web.json_response(
+            {
+                "ok": True,
+                "collector_restarted": collector_restarted,
+                "rebuild_required": actual_size != config.msc.image_size_mb * 1024 * 1024,
+            }
+        )
+
+    async def rebuild_msc(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        if payload.get("confirm") is not True:
+            return web.json_response(
+                {"ok": False, "error": "explicit rebuild confirmation is required"},
+                status=400,
+            )
+        config = load_config(self.config_path)
+        command = str(Path(config.gadget.apply_command).with_name("rebuild_msc_image.sh"))
+        active = is_msc_mode(config.gadget.mode)
+        if active:
+            await self._run_command(["systemctl", "stop", "gadget-collector.service"], 20)
+        try:
+            result = await self._run_command([command, "--config", str(self.config_path)], 180)
+        except Exception as exc:
+            LOGGER.exception("msc image rebuild failed")
+            return web.json_response({"ok": False, "error": f"MSC rebuild failed: {exc}"}, status=500)
+        finally:
+            if active:
+                try:
+                    await self._run_command(["systemctl", "start", "gadget-collector.service"], 20)
+                except Exception:
+                    LOGGER.exception("failed to restart collector after MSC rebuild")
+        return web.json_response({"ok": True, "output": result.stdout[-2000:]})
+
+    async def _run_command(self, command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+        return await asyncio.to_thread(
+            subprocess.run,
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+
+    async def _restart_collector(self) -> None:
+        await self._run_command(["systemctl", "restart", "gadget-collector.service"], 20)
+
+    async def _reapply_gadget(self, config: AppConfig) -> None:
+        await self._run_command(["systemctl", "stop", "gadget-collector.service"], 20)
+        try:
+            await self._run_command(
+                [config.gadget.apply_command, "--config", str(self.config_path)],
+                60,
+            )
+        finally:
+            await self._run_command(["systemctl", "start", "gadget-collector.service"], 20)
 
     async def switch_gadget(self, request: web.Request) -> web.Response:
         payload = await request.json()
@@ -370,6 +697,28 @@ class ConfigWebApp:
         )
         return web.json_response(result)
 
+    async def download_report(self, request: web.Request) -> web.StreamResponse:
+        job_id = int(request.match_info["job_id"])
+        job = await asyncio.to_thread(self.uploader.store.get, job_id)
+        if job is None:
+            raise web.HTTPNotFound(text="report job not found")
+        config = load_config(self.config_path)
+        root = Path(config.pdf.output_dir).resolve()
+        path = Path(str(job["pdf_path"])).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            LOGGER.warning("blocked report download outside output directory: %s", path)
+            raise web.HTTPNotFound(text="report file not found") from None
+        if not path.is_file():
+            raise web.HTTPNotFound(text="report file not found")
+        filename = Path(str(job.get("pdf_name") or path.name)).name
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "Cache-Control": "private, no-store",
+        }
+        return web.FileResponse(path, headers=headers)
+
     async def retry_report(self, request: web.Request) -> web.Response:
         job_id = int(request.match_info["job_id"])
         changed = await asyncio.to_thread(self.uploader.store.retry, job_id)
@@ -405,6 +754,146 @@ class ConfigWebApp:
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         return web.json_response({"ok": processed > 0, "queued": queued, "processed": processed})
+
+    async def wifi_status(self, request: web.Request) -> web.Response:
+        try:
+            status = await asyncio.to_thread(self.wifi.status)
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **status})
+
+    async def wifi_radio(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        try:
+            status = await asyncio.to_thread(self.wifi.set_radio, bool(payload.get("enabled")))
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **status})
+
+    async def wifi_scan(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        try:
+            networks = await asyncio.to_thread(self.wifi.scan, str(payload.get("device", "")), True)
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "networks": networks})
+
+    async def wifi_connect(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        try:
+            status = await asyncio.to_thread(
+                self.wifi.connect,
+                str(payload.get("ssid", "")),
+                str(payload.get("password", "")),
+                str(payload.get("device", "")),
+                bool(payload.get("hidden", False)),
+                bool(payload.get("autoconnect", True)),
+            )
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **status})
+
+    async def wifi_disconnect(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        try:
+            status = await asyncio.to_thread(self.wifi.disconnect, str(payload.get("device", "")))
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **status})
+
+    async def wifi_forget(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        try:
+            status = await asyncio.to_thread(self.wifi.forget, str(payload.get("connection", "")))
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **status})
+
+    async def network_status(self, request: web.Request) -> web.Response:
+        config = load_config(self.config_path)
+        try:
+            ethernet = await asyncio.to_thread(self.wifi.ethernet_status)
+            wifi = await asyncio.to_thread(self.wifi.status)
+            async with self.hotspot_lock:
+                hotspot = await asyncio.to_thread(self.wifi.hotspot_status, config.hotspot)
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(
+            {
+                "ok": True,
+                "ethernet": ethernet,
+                "wifi": wifi,
+                "hotspot": hotspot,
+            }
+        )
+
+    async def put_hotspot_config(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        config = load_config(self.config_path)
+        if "autostart" in payload and not isinstance(payload["autostart"], bool):
+            return web.json_response({"ok": False, "error": "autostart must be a boolean"}, status=400)
+        config.hotspot.ssid = str(payload.get("ssid", config.hotspot.ssid)).strip()
+        password = str(payload.get("password", ""))
+        if password:
+            config.hotspot.password = password
+        config.hotspot.autostart = bool(payload.get("autostart", config.hotspot.autostart))
+        try:
+            config.hotspot.idle_timeout_minutes = int(
+                payload.get("idle_timeout_minutes", config.hotspot.idle_timeout_minutes)
+            )
+            validate_config(config)
+            async with self.hotspot_lock:
+                status = await asyncio.to_thread(self.wifi.configure_hotspot, config.hotspot)
+            await asyncio.to_thread(save_config, self.config_path, config)
+        except (WifiError, ValueError, OSError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self.config = config
+        return web.json_response({"ok": True, **status})
+
+    async def switch_hotspot(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        if not isinstance(payload.get("enabled"), bool):
+            return web.json_response({"ok": False, "error": "enabled must be a boolean"}, status=400)
+        config = load_config(self.config_path)
+        try:
+            async with self.hotspot_lock:
+                status = await asyncio.to_thread(
+                    self.wifi.set_hotspot,
+                    config.hotspot,
+                    payload["enabled"],
+                )
+        except (WifiError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **status})
+
+    async def monitor_hotspot(self) -> None:
+        startup_complete = False
+        while True:
+            try:
+                startup_complete = await self._monitor_hotspot_once(startup_complete)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, ValueError, WifiError):
+                LOGGER.exception("hotspot idle monitor failed")
+            await asyncio.sleep(15)
+
+    async def _monitor_hotspot_once(self, startup_complete: bool) -> bool:
+        config = load_config(self.config_path)
+        async with self.hotspot_lock:
+            if not startup_complete:
+                status = await asyncio.to_thread(self.wifi.hotspot_status, config.hotspot)
+                if config.hotspot.autostart and not status["active"]:
+                    status = await asyncio.to_thread(self.wifi.set_hotspot, config.hotspot, True)
+                    LOGGER.info("hotspot %s restored by autostart", config.hotspot.ssid)
+                return True
+            status = await asyncio.to_thread(self.wifi.enforce_hotspot_idle, config.hotspot)
+        if status.get("auto_disabled"):
+            LOGGER.info(
+                "hotspot %s disabled after %d idle minute(s)",
+                config.hotspot.ssid,
+                config.hotspot.idle_timeout_minutes,
+            )
+        return True
 
 
 def _optional_float(value: str | None) -> float | None:

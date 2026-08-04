@@ -67,9 +67,12 @@
             <div class="error-summary">{{ shortError(row) }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" width="270" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
+              <el-button link type="primary" :icon="Download" @click="downloadReport(row)">
+                下载
+              </el-button>
               <el-button v-if="row.last_error || row.last_response" link type="primary" @click="showDetail(row)">
                 查看详情
               </el-button>
@@ -122,7 +125,7 @@
 
 <script setup>
 import { onMounted, reactive, ref } from "vue";
-import { Refresh, Search } from "@element-plus/icons-vue";
+import { Download, Refresh, Search } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, errorMessage } from "@/api/client";
 import { formatBytes, formatTime } from "@/utils/format";
@@ -194,6 +197,15 @@ function resetFilters() {
 function showDetail(row) {
   selected.value = row;
   detailVisible.value = true;
+}
+
+function downloadReport(row) {
+  const link = document.createElement("a");
+  link.href = `/api/reports/${row.id}/download`;
+  link.download = row.pdf_name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 async function retry(row) {

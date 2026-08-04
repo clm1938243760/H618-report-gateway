@@ -67,7 +67,10 @@ import {
   ArrowDown,
   ArrowUp,
   Clock,
+  Coin,
+  Connection,
   Document,
+  Printer,
   Setting,
   SwitchButton,
   UserFilled
@@ -81,6 +84,9 @@ const session = useSessionStore();
 const navigation = [
   { path: "/config", label: "配置管理", icon: Setting },
   { path: "/reports", label: "报告日志", icon: Document },
+  { path: "/printer", label: "模拟打印配置", icon: Printer },
+  { path: "/msc", label: "模拟U盘配置", icon: Coin },
+  { path: "/wifi", label: "网络配置", icon: Connection },
   { path: "/maintenance", label: "存储与清理", icon: Clock }
 ];
 

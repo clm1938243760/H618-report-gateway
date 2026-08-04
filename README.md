@@ -1,5 +1,8 @@
 # KICKPI K2B MSC / Printer 报告网关
 
+当前发布版本：`v0.1`。完整功能、验证结果和部署注意事项见
+[v0.1 版本说明](docs/RELEASE_NOTES_v0.1.md)。
+
 本项目是 RK3566 报告网关的独立迁移版本，目标硬件为 KICKPI K2B（Allwinner
 H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发和部署改动。
 
@@ -7,7 +10,7 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 
 - 已复制当前有效的 Python 后端、Vue 管理端和生产构建。
 - 已把固定 RK3566 UDC 改为单 UDC 自动识别。
-- 已把 USB Printer 描述符改为 KICKPI K2B。
+- USB Printer 厂商描述符固定为 JVLEI，设备名称和序列号可配置。
 - 已在 K2B 实板和 Windows 主机验证 UDC、MSC、Printer、HID 与 HTTPS。
 - 已完成 Windows 写入真实 PDF、板端提取转换、队列处理和 Mock HTTP 上传闭环，
   `MacCode`、`MsgId`、`hospitalCode` 及两个 multipart 文件字段均通过校验。
@@ -23,7 +26,7 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 
 ## 功能
 
-- HTTPS 8443 管理页面切换四种 USB 工作模式。
+- 标准 HTTPS 443 管理页面切换四种 USB 工作模式，并保留 8443 兼容访问。
 - 支持 `msc_hid`、`printer_hid`、`msc`、`printer`。
 - HID 复合模式同时提供标准键盘和相对鼠标 Function。
 - MSC 模式通过 FAT32 镜像接收报告。
@@ -32,6 +35,11 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 - SQLite 上传队列、失败重试、日志查询和定期清理。
 - 生成最小 `ReportInfo.xml`。
 - 正式上传携带 `MacCode`、`MsgId`、`hospitalCode` Header。
+- 模拟打印配置支持切换通用、PCL、PostScript 和 RAW 驱动声明，并只读分析最近的 PRN 协议。
+- 模拟U盘配置支持调整容量、卷标、去重、转换成功后自动删除及标志文件保护。
+- 报告日志支持直接下载板端留存的 PDF。
+- 网络配置页统一显示有线 IP、Wi-Fi 状态和附近网络，并支持无线连接、断开和忘记网络。
+- 维护热点使用 `wlan1` 提供 `192.168.0.1/24` 管理网络，可配置 SSID、密码、开机自启和无人连接自动关闭。
 
 所有模式共用一个 USB Device Controller，同一时刻只绑定一个 Gadget。
 
@@ -41,7 +49,7 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 程序：/opt/gadget-msc-printer
 配置：/etc/gadget-msc-printer/config.yaml
 数据：/var/lib/gadget-msc-printer
-管理：https://<board-ip>:8443
+管理：https://<board-ip>
 ```
 
 `gadget.udc_device` 和 `msc.udc_device` 默认是 `auto`。只有一个 UDC 时自动选择；
@@ -98,6 +106,10 @@ portal/portal/dist/index.html
 ```
 
 板端不安装 Node.js，前端必须在开发电脑构建后随部署包一起传输。
+
+调整 U 盘容量只会更新配置。必须在“模拟U盘配置”页面明确确认“重建U盘”后，
+系统才会重新格式化镜像并使新容量生效。重建会清空普通文件，配置的标志文件会从
+保护目录恢复。
 
 ## 关键风险
 

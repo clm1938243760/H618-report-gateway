@@ -444,10 +444,274 @@ textarea {
   white-space: pre-wrap;
 }
 
+.monospace {
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.analysis-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+  margin-top: 5vh !important;
+}
+
+.analysis-dialog .el-dialog__body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .maintenance-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.configuration-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.configuration-summary .summary-item.wide {
+  grid-column: span 2;
+}
+
+.page-alert {
+  margin-bottom: 16px;
+}
+
+.protected-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.protected-status-list span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.success-text {
+  color: #169b62;
+}
+
+.warning-text {
+  color: #d68118;
+}
+
+.connection-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 0 18px;
+}
+
+.wifi-note {
+  margin-bottom: 0;
+}
+
+.wifi-scan-note {
+  margin: 0;
+}
+
+.wifi-network-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wifi-signal {
+  width: 170px;
+}
+
+.network-page {
+  padding-bottom: 8px;
+}
+
+.network-page .page-heading p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.network-section {
+  margin-bottom: 14px;
+  padding: 17px 22px;
+}
+
+.network-section-heading {
+  margin-bottom: 14px;
+}
+
+.network-section-heading > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.network-section-heading .section-note {
+  margin: 0;
+}
+
+.network-status-row,
+.wifi-current-strip {
+  display: grid;
+  border: 1px solid var(--line);
+  background: #f8fbfd;
+}
+
+.network-status-row {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.wifi-current-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.network-status-row > div,
+.wifi-current-strip > div {
+  min-width: 0;
+  padding: 11px 16px;
+  border-right: 1px solid var(--line);
+}
+
+.network-status-row > div:last-child,
+.wifi-current-strip > div:last-child {
+  border-right: 0;
+}
+
+.network-status-row span,
+.wifi-current-strip span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.network-status-row strong,
+.wifi-current-strip strong {
+  display: block;
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wifi-current-strip {
+  margin-bottom: 13px;
+}
+
+.network-form .el-form-item {
+  margin-bottom: 12px;
+}
+
+.network-form .el-form-item__label {
+  margin-bottom: 5px;
+}
+
+.network-form-grid {
+  display: grid;
+  gap: 0 14px;
+}
+
+.wifi-form-grid {
+  grid-template-columns: 0.9fr 1.35fr 1.15fr 1fr;
+}
+
+.hotspot-form-grid {
+  grid-template-columns: 1.2fr 1.2fr 0.75fr 1fr;
+}
+
+.compact-switches .el-form-item__content {
+  flex-wrap: nowrap;
+  gap: 14px;
+  min-height: 32px;
+}
+
+.compact-switches .el-checkbox {
+  margin-right: 0;
+}
+
+.compact-actions {
+  margin: 0 0 13px;
+}
+
+.nearby-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 35px;
+  border-top: 1px solid var(--line);
+}
+
+.nearby-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.nearby-heading span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.compact-signal {
+  display: grid;
+  grid-template-columns: minmax(0, 120px) 40px;
+  align-items: center;
+  gap: 8px;
+}
+
+.compact-signal span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.hotspot-heading-actions,
+.hotspot-footer,
+.hotspot-meta {
+  display: flex;
+  align-items: center;
+}
+
+.hotspot-heading-actions {
+  gap: 16px;
+}
+
+.hotspot-clients {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.hotspot-form-grid .el-input-number {
+  width: 148px;
+}
+
+.field-unit {
+  margin-left: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.hotspot-footer {
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.hotspot-meta {
+  gap: 28px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.hotspot-meta strong {
+  margin-left: 5px;
+  color: var(--text);
+  font-weight: 500;
 }
 
 .summary-item {

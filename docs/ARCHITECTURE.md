@@ -7,7 +7,7 @@
 - 系统：Armbian / Ubuntu 24.04 aarch64
 - USB Device Controller：运行时从 `/sys/class/udc` 自动选择
 - 当前实板 UDC：`musb-hdrc.4.auto`
-- 管理端：HTTPS 8443，Vue 3 + aiohttp
+- 管理端：标准 HTTPS 443，兼容 8443，Vue 3 + aiohttp
 
 项目不在业务代码中写死 UDC 名称。只有一个 UDC 时自动选择；如果目标系统暴露
 多个 UDC，必须在 `config.yaml` 中明确指定 `gadget.udc_device`。
@@ -70,17 +70,21 @@ HID 设备节点通常为 `/dev/hidg0` 和 `/dev/hidg1`，但主机侧功能枚�
   -> 监控镜像 mtime
   -> 等待 stable + quiet
   -> 解绑 UDC 和 backing file
-  -> loop 只读挂载
+  -> loop 挂载（普通采集只读，自动删除/标志恢复时读写）
   -> 按路径、大小和 SHA-256 去重
   -> 复制到 msc_files
+  -> 校验副本并转换为 PDF
+  -> 可选删除已成功处理的源文件
+  -> 检查并恢复受保护的标志文件
   -> 卸载并恢复 MSC gadget
-  -> PdfConverter
   -> reports_pdf
   -> SQLite 上传队列
 ```
 
 默认镜像为 512 MB、MBR + FAT32，数据目录位于
-`/var/lib/gadget-msc-printer`。
+`/var/lib/gadget-msc-printer`。容量变更不会隐式格式化镜像，必须通过网页显式确认后
+调用 `scripts/rebuild_msc_image.sh` 重建。`msc.protected_files` 中的相对路径不会作为
+报告采集；首次发现时备份到 `msc.protected_seed_dir`，后续缺失时按配置自动恢复。
 
 ## Printer 报告链路
 
@@ -102,6 +106,14 @@ HID 设备节点通常为 `/dev/hidg0` 和 `/dev/hidg1`，但主机侧功能枚�
 
 无法识别或转换时保留原始打印流并记录失败，不生成占位 PDF，防止上传错误报告。
 GhostPDL 使用 AGPL/商业双许可，量产前必须完成许可证评审。
+
+网页“模拟打印配置”只开放驱动声明、打印机名称、序列号、任务结束等待时间和最小
+任务大小。USB VID/PID 使用固定 Gadget 测试值，厂商固定为 `JVLEI`，这些字段不会由
+查询 API 返回，也不能通过网页修改。驱动类型只改变 USB Printer 的 IEEE 1284 Device
+ID 命令声明：`universal`、`pcl`、`postscript` 或 `raw`；它不会把一种打印语言转换成
+另一种。Printer 模式运行期间保存会影响枚举的字段时，服务会事务式重新枚举 gadget，
+失败则回滚旧配置。只读 PRN 分析器根据文件头和协议特征报告可能的 PCL、PCL XL、
+PostScript、PDF 或私有打印流，不修改原始任务。
 
 ## XML 和上传
 
@@ -140,21 +152,46 @@ pending -> uploading -> uploaded
 ```
 
 SQLite 记录 PDF/XML 哈希、来源、HTTP 状态、响应摘要、完整错误、尝试次数和下次重试
-时间。是否按 PDF SHA-256 去重由 `upload.deduplicate` 控制。
+时间。网页中的“重复文件去重”会同步设置 `upload.deduplicate` 与
+`msc.deduplicate`：开启时跳过已提取或已入队的相同内容，关闭时允许同一文件
+重复提取、转换和上传，供现场测试使用。SHA-256 完整性校验不受该开关影响。
+
+报告下载接口 `GET /api/reports/{job_id}/download` 只允许访问配置的 PDF 输出目录，
+要求有效登录会话，并以附件方式返回队列中仍然存在的 PDF；路径越界或文件已清理时
+返回 404。
 
 ## Web 与安全
 
-- 只监听 HTTPS 8443。
+- 主监听端口为标准 HTTPS 443，同时保留 HTTPS 8443 兼容访问。
 - 用户名、密码和会话时长保存在 `config.yaml`，配置权限为 `0640`。
 - 登录比较使用常量时间比较。
 - 会话 Cookie 使用 Secure、HttpOnly 和 SameSite=Strict。
 - 所有写操作校验 CSRF token。
 - 登录失败有限流保护。
 - 配置查询接口不返回密码。
+- 打印配置、U盘配置和重建操作均要求登录；所有写操作继续校验 CSRF token。
 
 Vue 开发服务器默认代理到 `https://192.168.20.144:8443`，可通过
 `VITE_API_PROXY_TARGET` 覆盖。生产环境由 aiohttp 直接提供预构建的 `dist`，板端
 不安装 Node.js。
+
+## 网络与维护热点
+
+管理端通过 `/api/network` 汇总有线、Wi-Fi 客户端和维护热点状态。有线 IP 从 `ip -j`
+结构化输出读取；`/api/wifi/*` 和 `/api/hotspot/*` 调用独立的 `WifiManager`，由
+NetworkManager 的 `nmcli` 完成无线开关、扫描、连接和 AP 管理。命令以参数数组执行，
+不经过 Shell；Wi-Fi 和热点密码不会通过状态 API 返回，也不会写入应用日志。
+
+Wi-Fi 配置默认设置 `ipv4.route-metric=600` 和 `ipv6.route-metric=600`。现有有线网络
+metric 为 100 时优先走有线，拔掉网线后 NetworkManager 自动使用已保存且允许自动
+连接的 Wi-Fi。网页服务监听 `0.0.0.0:443` 和兼容端口 `8443`，因此可分别通过有线 IP 或 Wi-Fi IP
+访问同一管理端。
+
+维护热点固定使用 `wlan1` 和 `192.168.0.1/24`，连接配置名为 `gmp-hotspot`。
+NetworkManager 的 shared IPv4 模式负责 DHCP 和地址分配，运行环境因此需要
+`dnsmasq-base` 与 `iptables`。`gadget-web` 每 15 秒通过 `iw station dump` 统计热点客户
+端；当客户端数量为零且达到 `hotspot.idle_timeout_minutes` 时关闭热点。`0` 表示禁用
+自动关闭，手动关闭不清除开机自启设置。
 
 ## 目录与故障恢复
 
