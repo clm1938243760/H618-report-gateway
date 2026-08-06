@@ -83,6 +83,7 @@ print(config.web.static_dir)
 print(config.device.device_code.strip())
 print(config.device.exam_doct.strip())
 print(config.device.exam_doct_code.strip())
+print("1" if config.physical_printer.enabled else "0")
 PY
 ); then
   fail "configuration cannot be loaded"
@@ -98,6 +99,7 @@ STATIC_DIR="${VALUES[5]}"
 DEVICE_CODE="${VALUES[6]}"
 EXAM_DOCT="${VALUES[7]}"
 EXAM_DOCT_CODE="${VALUES[8]}"
+PHYSICAL_PRINTER_ENABLED="${VALUES[9]}"
 
 printf 'K2B gateway acceptance\n'
 printf '  mode: %s\n' "$MODE"
@@ -236,6 +238,14 @@ if command -v gpcl6 >/dev/null 2>&1 || command -v pcl6 >/dev/null 2>&1; then
   pass "GhostPCL is available"
 else
   warn "GhostPCL is missing; PCL/PCL XL conversion is not ready"
+fi
+
+if command -v lpstat >/dev/null 2>&1 && systemctl is-active --quiet cups.service; then
+  pass "CUPS physical printer service is available"
+elif [[ "$PHYSICAL_PRINTER_ENABLED" == "1" ]]; then
+  fail "physical printing is enabled but CUPS is unavailable"
+else
+  warn "CUPS is unavailable; physical printer output is not ready"
 fi
 
 AVAILABLE_KB="$(df -Pk /var/lib/gadget-msc-printer 2>/dev/null | awk 'NR==2 {print $4}')"

@@ -33,6 +33,12 @@ const routes = [
         meta: { title: "模拟打印配置" }
       },
       {
+        path: "physical-printer",
+        name: "physical-printer",
+        component: () => import("@/views/gateway/PhysicalPrinterView.vue"),
+        meta: { title: "实体打印机配置" }
+      },
+      {
         path: "msc",
         name: "msc",
         component: () => import("@/views/gateway/MscConfigView.vue"),

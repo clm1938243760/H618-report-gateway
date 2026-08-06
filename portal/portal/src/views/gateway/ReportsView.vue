@@ -38,7 +38,7 @@
     </section>
 
     <section class="surface reports-table">
-      <el-table v-loading="loading" :data="jobs" stripe height="560">
+      <el-table v-loading="loading" :data="jobs" stripe height="560" class="desktop-only">
         <el-table-column label="采集时间" width="178">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
@@ -91,6 +91,40 @@
           <el-empty description="暂无报告记录" :image-size="92" />
         </template>
       </el-table>
+      <div v-loading="loading" class="mobile-only mobile-record-list">
+        <article v-for="row in jobs" :key="row.id" class="mobile-record">
+          <div class="mobile-record-heading">
+            <div>
+              <strong>{{ row.pdf_name }}</strong>
+              <span>{{ formatTime(row.created_at) }} · {{ formatBytes(row.pdf_size) }}</span>
+            </div>
+            <el-tag :type="statusMeta(row.status).type" effect="light">
+              {{ statusMeta(row.status).label }}
+            </el-tag>
+          </div>
+          <dl class="mobile-record-meta">
+            <dt>来源</dt>
+            <dd>{{ sourceName(row.source) }}</dd>
+            <dt>尝试次数</dt>
+            <dd>{{ row.attempts }}</dd>
+            <dt>HTTP 状态</dt>
+            <dd>{{ row.last_http_status || "-" }}</dd>
+            <dt>结果</dt>
+            <dd :class="{ 'error-text': row.last_error }">{{ shortError(row) }}</dd>
+          </dl>
+          <div class="mobile-record-actions">
+            <el-button type="primary" plain :icon="Download" @click="downloadReport(row)">下载</el-button>
+            <el-button v-if="row.last_error || row.last_response" @click="showDetail(row)">查看详情</el-button>
+            <el-button
+              v-if="['retry_wait', 'exhausted'].includes(row.status)"
+              @click="retry(row)"
+            >
+              失败重试
+            </el-button>
+          </div>
+        </article>
+        <el-empty v-if="!loading && jobs.length === 0" description="暂无报告记录" :image-size="76" />
+      </div>
       <div class="pagination-row">
         <el-pagination
           v-model:current-page="page"

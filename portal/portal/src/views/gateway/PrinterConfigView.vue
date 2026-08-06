@@ -60,8 +60,10 @@
         <h2>最近打印流协议分析</h2>
         <el-button :icon="Refresh" :loading="analysisLoading" @click="loadAnalysis">刷新分析</el-button>
       </div>
-      <el-table :data="jobs" stripe height="390">
-        <el-table-column prop="modified_time" label="接收时间" width="180" />
+      <el-table :data="jobs" stripe height="390" class="desktop-only">
+        <el-table-column label="接收时间" width="180">
+          <template #default="{ row }">{{ formatTime(row.modified_at) }}</template>
+        </el-table-column>
         <el-table-column prop="name" label="PRN 文件" min-width="270" show-overflow-tooltip />
         <el-table-column label="大小" width="110">
           <template #default="{ row }">{{ formatBytes(row.size) }}</template>
@@ -85,6 +87,34 @@
         </el-table-column>
         <template #empty><el-empty description="暂无打印流" :image-size="80" /></template>
       </el-table>
+      <div v-loading="analysisLoading" class="mobile-only mobile-record-list">
+        <article v-for="row in jobs" :key="row.name" class="mobile-record">
+          <div class="mobile-record-heading">
+            <div>
+              <strong>{{ row.name }}</strong>
+              <span>{{ formatTime(row.modified_at) }} · {{ formatBytes(row.size) }}</span>
+            </div>
+            <el-tag :type="confidenceType(row.confidence)" effect="light">
+              {{ confidenceName(row.confidence) }}可信度
+            </el-tag>
+          </div>
+          <dl class="mobile-record-meta">
+            <dt>识别协议</dt>
+            <dd>{{ row.protocol_label }}</dd>
+            <dt>PJL 声明</dt>
+            <dd>{{ row.declared_language || "-" }}</dd>
+            <dt>处理方式</dt>
+            <dd>{{ row.converter }}</dd>
+            <dt>判断依据</dt>
+            <dd>{{ row.evidence || "-" }}</dd>
+          </dl>
+          <div class="mobile-record-actions">
+            <el-button type="primary" plain :icon="View" @click="showAnalysis(row)">查看分析</el-button>
+            <el-button :icon="Download" @click="downloadPrn(row)">下载 PRN</el-button>
+          </div>
+        </article>
+        <el-empty v-if="!analysisLoading && jobs.length === 0" description="暂无打印流" :image-size="76" />
+      </div>
     </section>
 
     <el-dialog v-model="analysisVisible" class="analysis-dialog" title="打印流详细分析" width="860px">
@@ -125,7 +155,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { DocumentChecked, Download, Refresh, View } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, errorMessage } from "@/api/client";
-import { formatBytes } from "@/utils/format";
+import { formatBytes, formatTime } from "@/utils/format";
 
 const formRef = ref();
 const loading = ref(false);

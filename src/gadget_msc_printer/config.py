@@ -19,6 +19,16 @@ PRINTER_DRIVER_COMMANDS = {
     "postscript": "PJL,POSTSCRIPT,RAW",
     "raw": "RAW",
 }
+PHYSICAL_PRINTER_DRIVER_PROFILES = frozenset(
+    {
+        "ipp_everywhere",
+        "hp_laserjet_m401_pcl6",
+        "brother_hl1200",
+        "generic_postscript",
+        "generic_pcl",
+        "generic_pcl6",
+    }
+)
 FIXED_PRINTER_VENDOR_ID = "0x0525"
 FIXED_PRINTER_PRODUCT_ID = "0xa4a8"
 FIXED_PRINTER_MANUFACTURER = "JVLEI"
@@ -165,6 +175,24 @@ class PrinterConfig:
 
 
 @dataclass
+class PhysicalPrinterConfig:
+    enabled: bool = False
+    auto_print: bool = False
+    queue_name: str = "Physical_Printer"
+    device_uri: str = ""
+    driver_profile: str = "hp_laserjet_m401_pcl6"
+    page_size: str = "A4"
+    resolution: str = "600dpi"
+    copies: int = 1
+    set_default: bool = True
+    state_db: str = "/var/lib/gadget-msc-printer/state/physical_print_jobs.sqlite3"
+    poll_interval_seconds: float = 0.5
+    file_stable_seconds: float = 2.0
+    retry_interval_seconds: int = 60
+    max_attempts: int = 3
+
+
+@dataclass
 class PdfConfig:
     enabled: bool = True
     output_dir: str = "/var/lib/gadget-msc-printer/reports_pdf"
@@ -183,6 +211,7 @@ class AppConfig:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     msc: MscConfig = field(default_factory=MscConfig)
     printer: PrinterConfig = field(default_factory=PrinterConfig)
+    physical_printer: PhysicalPrinterConfig = field(default_factory=PhysicalPrinterConfig)
     pdf: PdfConfig = field(default_factory=PdfConfig)
 
 
@@ -230,6 +259,7 @@ def load_config(path: str | Path) -> AppConfig:
         cleanup=_merge_dataclass(CleanupConfig, data.get("cleanup", {})),
         msc=_merge_dataclass(MscConfig, data.get("msc", {})),
         printer=_merge_dataclass(PrinterConfig, data.get("printer", {})),
+        physical_printer=_merge_dataclass(PhysicalPrinterConfig, data.get("physical_printer", {})),
         pdf=_merge_dataclass(PdfConfig, data.get("pdf", {})),
     )
     normalize_printer_identity(config.printer)
@@ -320,6 +350,40 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("printer.idle_complete_seconds must be between 0.5 and 120")
     if not 1 <= config.printer.min_job_bytes <= 10 * 1024 * 1024:
         raise ValueError("printer.min_job_bytes must be between 1 and 10485760")
+    if (
+        not config.physical_printer.queue_name
+        or len(config.physical_printer.queue_name) > 64
+        or re.fullmatch(r"[A-Za-z0-9._-]+", config.physical_printer.queue_name) is None
+    ):
+        raise ValueError("physical_printer.queue_name contains invalid characters")
+    if config.physical_printer.driver_profile not in PHYSICAL_PRINTER_DRIVER_PROFILES:
+        raise ValueError("physical_printer.driver_profile is not supported")
+    if config.physical_printer.device_uri:
+        device_uri = urlparse(config.physical_printer.device_uri)
+        if device_uri.scheme not in {"usb", "ipp", "ipps", "socket", "lpd"}:
+            raise ValueError("physical_printer.device_uri must use usb, ipp, ipps, socket, or lpd")
+        if len(config.physical_printer.device_uri) > 1024 or any(
+            char in config.physical_printer.device_uri for char in "\r\n"
+        ):
+            raise ValueError("physical_printer.device_uri contains invalid characters")
+    if config.physical_printer.enabled and not config.physical_printer.device_uri:
+        raise ValueError("physical_printer.device_uri is required when physical printing is enabled")
+    if config.physical_printer.auto_print and not config.physical_printer.enabled:
+        raise ValueError("physical_printer.auto_print requires physical_printer.enabled")
+    if config.physical_printer.page_size not in {"A4", "A5", "Letter"}:
+        raise ValueError("physical_printer.page_size is not supported")
+    if config.physical_printer.resolution not in {"300dpi", "600dpi", "1200dpi"}:
+        raise ValueError("physical_printer.resolution is not supported")
+    if not 1 <= config.physical_printer.copies <= 99:
+        raise ValueError("physical_printer.copies must be between 1 and 99")
+    if not 0.5 <= config.physical_printer.poll_interval_seconds <= 300:
+        raise ValueError("physical_printer.poll_interval_seconds must be between 0.5 and 300")
+    if not 0 <= config.physical_printer.file_stable_seconds <= 300:
+        raise ValueError("physical_printer.file_stable_seconds must be between 0 and 300")
+    if config.physical_printer.retry_interval_seconds < 1:
+        raise ValueError("physical_printer.retry_interval_seconds must be at least 1")
+    if config.physical_printer.max_attempts < 1:
+        raise ValueError("physical_printer.max_attempts must be at least 1")
     if not 32 <= config.msc.image_size_mb <= 4096:
         raise ValueError("msc.image_size_mb must be between 32 and 4096")
     if not config.msc.label.strip() or len(config.msc.label.encode("ascii", errors="ignore")) != len(config.msc.label):

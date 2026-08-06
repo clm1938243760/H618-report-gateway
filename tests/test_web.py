@@ -19,6 +19,8 @@ from gadget_msc_printer.web import ConfigWebApp
 class FakeWifiManager:
     def __init__(self) -> None:
         self.last_connect: tuple[object, ...] | None = None
+        self.last_ipv4: dict[str, object] | None = None
+        self.scheduled_ipv4: dict[str, object] | None = None
         self.current = {
             "available": True,
             "radio_enabled": True,
@@ -35,6 +37,11 @@ class FakeWifiManager:
             "frequency": 5180,
             "channel": "36",
             "autoconnect": True,
+            "ipv4_mode": "dhcp",
+            "configured_address": "",
+            "prefix_length": 24,
+            "configured_gateway": "",
+            "dns": ["10.119.184.80"],
         }
         self.hotspot = {
             "available": True,
@@ -83,7 +90,39 @@ class FakeWifiManager:
             "gateway": "192.168.20.1",
             "mac": "00:11:22:33:44:55",
             "interfaces": [],
+            "ipv4_mode": "dhcp",
+            "configured_address": "",
+            "prefix_length": 24,
+            "configured_gateway": "",
+            "dns": ["192.168.20.1"],
         }
+
+    def configure_ipv4(
+        self,
+        interface_type,
+        mode,
+        address,
+        prefix_length,
+        gateway,
+        dns,
+        device,
+    ):
+        configuration = {
+            "interface_type": interface_type,
+            "backend": "networkd" if interface_type == "ethernet" else "networkmanager",
+            "device": device,
+            "connection": "" if interface_type == "ethernet" else self.current["connection"],
+            "mode": mode,
+            "address": address if mode == "manual" else "",
+            "prefix_length": prefix_length,
+            "gateway": gateway if mode == "manual" else "",
+            "dns": list(dns),
+        }
+        self.last_ipv4 = configuration
+        return configuration
+
+    def schedule_ipv4_activation(self, configuration, delay_seconds=2):
+        self.scheduled_ipv4 = {**configuration, "delay_seconds": delay_seconds}
 
     def hotspot_status(self, config):
         self.hotspot.update(
@@ -105,6 +144,64 @@ class FakeWifiManager:
         return {**self.hotspot_status(config), "auto_disabled": False}
 
 
+class FakeCupsManager:
+    def __init__(self) -> None:
+        self.configured = None
+        self.queue_enabled = True
+        self.deleted = False
+
+    def status(self, config):
+        configured = None
+        if self.configured is not None and not self.deleted:
+            configured = {
+                "name": config.queue_name,
+                "device_uri": config.device_uri,
+                "enabled": self.queue_enabled,
+                "state": "空闲" if self.queue_enabled else "暂停",
+                "detail": "idle",
+            }
+        return {
+            "available": True,
+            "running": True,
+            "error": "",
+            "devices": [
+                {
+                    "uri": "usb://Brother/HL-1218W?serial=TEST",
+                    "backend": "direct",
+                    "scheme": "usb",
+                    "label": "Brother/HL-1218W",
+                    "connection": "USB",
+                    "recommended_profile": "brother_hl1200",
+                }
+            ],
+            "profiles": [
+                {
+                    "value": "brother_hl1200",
+                    "label": "Brother HL-1200 系列（brlaser）",
+                    "available": True,
+                    "model": "drv:///brlaser.drv/br1200.ppd",
+                }
+            ],
+            "queues": [configured] if configured else [],
+            "configured_queue": configured,
+            "default_queue": config.queue_name if configured else "",
+        }
+
+    def configure(self, config):
+        self.configured = config
+        self.deleted = False
+        return {"queue_name": config.queue_name}
+
+    def test_print(self, config):
+        return f"{config.queue_name}-1"
+
+    def set_queue_enabled(self, queue_name: str, enabled: bool):
+        self.queue_enabled = enabled
+
+    def delete_queue(self, queue_name: str):
+        self.deleted = True
+
+
 class WebTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -122,6 +219,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         config.upload.state_db = str(root / "data" / "state" / "jobs.sqlite3")
         config.pdf.output_dir = str(root / "data" / "reports_pdf")
         config.printer.output_dir = str(root / "data" / "print_jobs")
+        config.physical_printer.state_db = str(root / "data" / "state" / "physical.sqlite3")
         config.msc.output_dir = str(root / "data" / "msc_files")
         frontend = Path(config.web.static_dir)
         (frontend / "static-resource" / "js").mkdir(parents=True)
@@ -149,6 +247,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             command_runner=lambda *args, **kwargs: CompletedProcess(args[0], 0, "vacuumed", ""),
         )
         self.wifi = FakeWifiManager()
+        self.cups = FakeCupsManager()
         self.web = ConfigWebApp(
             self.config_path,
             config,
@@ -157,6 +256,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             uploader,
             self.maintenance,
             self.wifi,
+            self.cups,
         )
         self.client = TestClient(TestServer(self.web.app))
         await self.client.start_server()
@@ -224,6 +324,26 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["ethernet"]["mac"], "00:11:22:33:44:55")
         self.assertEqual(payload["hotspot"]["ssid"], "JVLEI-Gateway")
         self.assertNotIn("password", str(payload))
+
+        response = await self.client.put(
+            "/api/network/ipv4",
+            headers=headers,
+            json={
+                "interface_type": "ethernet",
+                "device": "eth0",
+                "mode": "manual",
+                "address": "192.168.20.88",
+                "prefix_length": 24,
+                "gateway": "192.168.20.1",
+                "dns": ["192.168.20.1", "223.5.5.5"],
+            },
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(payload["address"], "192.168.20.88")
+        self.assertEqual(payload["activation_delay_seconds"], 2)
+        self.assertEqual(self.wifi.last_ipv4["device"], "eth0")
+        self.assertEqual(self.wifi.scheduled_ipv4["delay_seconds"], 2)
 
         response = await self.client.put(
             "/api/hotspot/config",
@@ -489,6 +609,53 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(await response.read(), (print_dir / "sample.prn").read_bytes())
         self.assertIn("attachment", response.headers["Content-Disposition"])
+
+    async def test_physical_printer_configuration_and_queue_controls(self) -> None:
+        token, csrf = await self._login()
+        headers = {"Cookie": f"gmp_session={token}", "X-CSRF-Token": csrf}
+
+        response = await self.client.get("/api/physical-printer", headers=headers)
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertTrue(payload["cups"]["running"])
+        self.assertEqual(payload["cups"]["devices"][0]["recommended_profile"], "brother_hl1200")
+
+        response = await self.client.put(
+            "/api/physical-printer/config",
+            headers=headers,
+            json={
+                "enabled": True,
+                "auto_print": True,
+                "queue_name": "Brother_HL1218W",
+                "device_uri": "usb://Brother/HL-1218W?serial=TEST",
+                "driver_profile": "brother_hl1200",
+                "page_size": "A4",
+                "resolution": "600dpi",
+                "copies": 1,
+                "set_default": True,
+            },
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertTrue(payload["applied"])
+        self.assertEqual(load_config(self.config_path).physical_printer.queue_name, "Brother_HL1218W")
+
+        response = await self.client.post("/api/physical-printer/test", headers=headers, json={})
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(payload["job_id"], "Brother_HL1218W-1")
+
+        response = await self.client.post(
+            "/api/physical-printer/control", headers=headers, json={"action": "pause"}
+        )
+        self.assertEqual(response.status, 200)
+        self.assertFalse(self.cups.queue_enabled)
+
+        response = await self.client.delete("/api/physical-printer/queue", headers=headers)
+        self.assertEqual(response.status, 200)
+        saved = load_config(self.config_path)
+        self.assertFalse(saved.physical_printer.enabled)
+        self.assertFalse(saved.physical_printer.auto_print)
 
     async def test_msc_configuration_and_explicit_rebuild(self) -> None:
         token, csrf = await self._login()

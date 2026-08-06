@@ -26,7 +26,9 @@ from .config import (
     save_config,
     validate_config,
 )
+from .cups_manager import CupsError, CupsManager
 from .maintenance import MaintenanceManager
+from .physical_print import PhysicalPrintWorker
 from .prn_analyzer import analyze_recent_prn
 from .report_info import ReportInfoManager
 from .report_upload import ReportUploadWorker
@@ -50,6 +52,8 @@ class ConfigWebApp:
         uploader: ReportUploadWorker,
         maintenance: MaintenanceManager,
         wifi: WifiManager | None = None,
+        cups: CupsManager | None = None,
+        physical_printer: PhysicalPrintWorker | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.config = config
@@ -58,6 +62,10 @@ class ConfigWebApp:
         self.uploader = uploader
         self.maintenance = maintenance
         self.wifi = wifi or WifiManager()
+        self.cups = cups or CupsManager()
+        self.physical_printer = physical_printer or PhysicalPrintWorker(
+            config.physical_printer, config.pdf, self.cups
+        )
         self.hotspot_lock = asyncio.Lock()
         self.login_failures: dict[str, list[float]] = {}
         self.app = web.Application(middlewares=[self.security_middleware])
@@ -78,6 +86,12 @@ class ConfigWebApp:
                 web.put("/api/printer/config", self.put_printer_config),
                 web.get("/api/printer/analysis", self.printer_analysis),
                 web.get(r"/api/printer/files/{name:.+}/download", self.download_printer_file),
+                web.get("/api/physical-printer", self.get_physical_printer),
+                web.post("/api/physical-printer/scan", self.scan_physical_printers),
+                web.put("/api/physical-printer/config", self.put_physical_printer),
+                web.post("/api/physical-printer/test", self.test_physical_printer),
+                web.post("/api/physical-printer/control", self.control_physical_printer),
+                web.delete("/api/physical-printer/queue", self.delete_physical_printer),
                 web.get("/api/msc/config", self.get_msc_config),
                 web.put("/api/msc/config", self.put_msc_config),
                 web.post("/api/msc/rebuild", self.rebuild_msc),
@@ -95,6 +109,7 @@ class ConfigWebApp:
                 web.post("/api/wifi/disconnect", self.wifi_disconnect),
                 web.post("/api/wifi/forget", self.wifi_forget),
                 web.get("/api/network", self.network_status),
+                web.put("/api/network/ipv4", self.put_network_ipv4),
                 web.put("/api/hotspot/config", self.put_hotspot_config),
                 web.post("/api/hotspot/switch", self.switch_hotspot),
             ]
@@ -120,7 +135,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.1.0"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.20.0"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
@@ -455,6 +470,125 @@ class ConfigWebApp:
             "Cache-Control": "private, no-store",
         }
         return web.FileResponse(path, headers=headers)
+
+    async def get_physical_printer(self, request: web.Request) -> web.Response:
+        config = load_config(self.config_path)
+        cups_status = await asyncio.to_thread(self.cups.status, config.physical_printer)
+        print_status = await asyncio.to_thread(self.physical_printer.status)
+        return web.json_response(
+            {
+                "ok": True,
+                "config": self._physical_printer_payload(config),
+                "cups": cups_status,
+                "auto_print": print_status,
+            }
+        )
+
+    async def scan_physical_printers(self, request: web.Request) -> web.Response:
+        config = load_config(self.config_path)
+        status = await asyncio.to_thread(self.cups.status, config.physical_printer)
+        return web.json_response({"ok": True, "cups": status})
+
+    async def put_physical_printer(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        config = load_config(self.config_path)
+        physical = config.physical_printer
+        for key in ("enabled", "auto_print", "set_default"):
+            if key in payload:
+                if not isinstance(payload[key], bool):
+                    return web.json_response(
+                        {"ok": False, "error": f"{key} must be a boolean"}, status=400
+                    )
+                setattr(physical, key, payload[key])
+        physical.queue_name = str(payload.get("queue_name", physical.queue_name)).strip()
+        physical.device_uri = str(payload.get("device_uri", physical.device_uri)).strip()
+        physical.driver_profile = str(
+            payload.get("driver_profile", physical.driver_profile)
+        ).strip()
+        physical.page_size = str(payload.get("page_size", physical.page_size)).strip()
+        physical.resolution = str(payload.get("resolution", physical.resolution)).strip()
+        try:
+            physical.copies = int(payload.get("copies", physical.copies))
+            validate_config(config)
+            applied = False
+            if physical.enabled:
+                await asyncio.to_thread(self.cups.configure, physical)
+                applied = True
+            await asyncio.to_thread(save_config, self.config_path, config)
+        except (CupsError, OSError, TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self.config = config
+        self.physical_printer.update_config(physical)
+        self.physical_printer.wake()
+        status = await asyncio.to_thread(self.cups.status, physical)
+        return web.json_response(
+            {
+                "ok": True,
+                "applied": applied,
+                "config": self._physical_printer_payload(config),
+                "cups": status,
+            }
+        )
+
+    async def test_physical_printer(self, request: web.Request) -> web.Response:
+        config = load_config(self.config_path)
+        if not config.physical_printer.enabled:
+            return web.json_response(
+                {"ok": False, "error": "physical printer is not enabled"}, status=400
+            )
+        try:
+            job_id = await asyncio.to_thread(self.cups.test_print, config.physical_printer)
+        except (CupsError, OSError, subprocess.SubprocessError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "job_id": job_id})
+
+    async def control_physical_printer(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        action = str(payload.get("action", "")).strip()
+        if action not in {"pause", "resume"}:
+            return web.json_response({"ok": False, "error": "unsupported queue action"}, status=400)
+        config = load_config(self.config_path)
+        try:
+            await asyncio.to_thread(
+                self.cups.set_queue_enabled,
+                config.physical_printer.queue_name,
+                action == "resume",
+            )
+        except CupsError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        status = await asyncio.to_thread(self.cups.status, config.physical_printer)
+        return web.json_response({"ok": True, "cups": status})
+
+    async def delete_physical_printer(self, request: web.Request) -> web.Response:
+        config = load_config(self.config_path)
+        try:
+            await asyncio.to_thread(
+                self.cups.delete_queue, config.physical_printer.queue_name
+            )
+            config.physical_printer.enabled = False
+            config.physical_printer.auto_print = False
+            await asyncio.to_thread(save_config, self.config_path, config)
+        except (CupsError, OSError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        self.config = config
+        self.physical_printer.update_config(config.physical_printer)
+        self.physical_printer.wake()
+        return web.json_response({"ok": True})
+
+    @staticmethod
+    def _physical_printer_payload(config: AppConfig) -> dict[str, Any]:
+        physical = config.physical_printer
+        return {
+            "enabled": physical.enabled,
+            "auto_print": physical.auto_print,
+            "queue_name": physical.queue_name,
+            "device_uri": physical.device_uri,
+            "driver_profile": physical.driver_profile,
+            "page_size": physical.page_size,
+            "resolution": physical.resolution,
+            "copies": physical.copies,
+            "set_default": physical.set_default,
+        }
 
     async def get_msc_config(self, request: web.Request) -> web.Response:
         config = load_config(self.config_path)
@@ -824,6 +958,34 @@ class ConfigWebApp:
                 "ethernet": ethernet,
                 "wifi": wifi,
                 "hotspot": hotspot,
+            }
+        )
+
+    async def put_network_ipv4(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        dns = payload.get("dns", [])
+        if not isinstance(dns, (list, tuple, str)):
+            return web.json_response({"ok": False, "error": "dns must be a list or string"}, status=400)
+        try:
+            prefix_length = int(payload.get("prefix_length", 24))
+            configuration = await asyncio.to_thread(
+                self.wifi.configure_ipv4,
+                str(payload.get("interface_type", "")),
+                str(payload.get("mode", "")),
+                str(payload.get("address", "")),
+                prefix_length,
+                str(payload.get("gateway", "")),
+                dns,
+                str(payload.get("device", "")),
+            )
+            await asyncio.to_thread(self.wifi.schedule_ipv4_activation, configuration, 2)
+        except (WifiError, ValueError, OSError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(
+            {
+                "ok": True,
+                **configuration,
+                "activation_delay_seconds": 2,
             }
         )
 

@@ -56,6 +56,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.printer.usb_manufacturer, "JVLEI")
         self.assertIn("MFG:JVLEI", loaded.printer.usb_pnp_string)
         self.assertEqual(loaded.printer.usb_product, "K2B USB Printer")
+        self.assertFalse(loaded.physical_printer.enabled)
+        self.assertFalse(loaded.physical_printer.auto_print)
+        self.assertEqual(loaded.physical_printer.driver_profile, "hp_laserjet_m401_pcl6")
+        self.assertEqual(loaded.physical_printer.page_size, "A4")
+        self.assertEqual(loaded.physical_printer.poll_interval_seconds, 0.5)
 
     def test_legacy_printer_identity_is_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -142,6 +147,24 @@ class ConfigTests(unittest.TestCase):
         config.hotspot.password = "valid-password"
         config.hotspot.idle_timeout_minutes = 1441
         with self.assertRaisesRegex(ValueError, "idle_timeout_minutes"):
+            validate_config(config)
+
+    def test_invalid_physical_printer_configuration_is_rejected(self) -> None:
+        config = AppConfig()
+        config.physical_printer.enabled = True
+        with self.assertRaisesRegex(ValueError, "device_uri"):
+            validate_config(config)
+        config.physical_printer.enabled = False
+        config.physical_printer.auto_print = True
+        with self.assertRaisesRegex(ValueError, "auto_print"):
+            validate_config(config)
+        config.physical_printer.auto_print = False
+        config.physical_printer.device_uri = "file:///tmp/output"
+        with self.assertRaisesRegex(ValueError, "must use"):
+            validate_config(config)
+        config.physical_printer.device_uri = "usb://Brother/HL-1218W"
+        config.physical_printer.queue_name = "bad queue"
+        with self.assertRaisesRegex(ValueError, "queue_name"):
             validate_config(config)
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +84,9 @@ def analyze_prn(path: str | Path) -> dict[str, Any]:
         "name": source.name,
         "size": stat.st_size,
         "modified_at": stat.st_mtime,
-        "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        "modified_time": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(
+            timespec="seconds"
+        ),
         "protocol": protocol,
         "protocol_label": PROTOCOL_LABELS[protocol],
         "confidence": confidence,

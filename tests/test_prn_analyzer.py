@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,6 +54,17 @@ class PrnAnalyzerTests(unittest.TestCase):
             jobs = analyze_recent_prn(root, 10)
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["name"], "one.prn")
+
+    def test_receive_time_includes_utc_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timed.prn"
+            path.write_bytes(b"%PDF-1.7")
+            timestamp = 1_750_000_000
+            os.utime(path, (timestamp, timestamp))
+            result = analyze_prn(path)
+
+        self.assertEqual(result["modified_at"], timestamp)
+        self.assertEqual(result["modified_time"], "2025-06-15T15:06:40+00:00")
 
 
 if __name__ == "__main__":

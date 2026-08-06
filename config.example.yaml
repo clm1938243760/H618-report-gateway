@@ -103,6 +103,22 @@ printer:
   min_job_bytes: 128
   chunk_size: 65536
 
+physical_printer:
+  enabled: false
+  auto_print: false
+  queue_name: Physical_Printer
+  device_uri: ""
+  driver_profile: hp_laserjet_m401_pcl6
+  page_size: A4
+  resolution: 600dpi
+  copies: 1
+  set_default: true
+  state_db: /var/lib/gadget-msc-printer/state/physical_print_jobs.sqlite3
+  poll_interval_seconds: 0.5
+  file_stable_seconds: 2
+  retry_interval_seconds: 60
+  max_attempts: 3
+
 pdf:
   enabled: true
   output_dir: /var/lib/gadget-msc-printer/reports_pdf

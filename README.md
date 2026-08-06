@@ -1,7 +1,7 @@
 # KICKPI K2B MSC / Printer 报告网关
 
-当前发布版本：`v0.1`。完整功能、验证结果和部署注意事项见
-[v0.1 版本说明](docs/RELEASE_NOTES_v0.1.md)。
+当前发布版本：`v0.20`。完整功能、验证结果和部署注意事项见
+[v0.20 版本说明](docs/RELEASE_NOTES_v0.20.md)。
 
 本项目是 RK3566 报告网关的独立迁移版本，目标硬件为 KICKPI K2B（Allwinner
 H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发和部署改动。
@@ -36,6 +36,9 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 - 生成最小 `ReportInfo.xml`。
 - 正式上传携带 `MacCode`、`MsgId`、`hospitalCode` Header。
 - 模拟打印配置支持切换通用、PCL、PostScript 和 RAW 驱动声明，并只读分析最近的 PRN 协议。
+- 实体打印机配置通过 CUPS 扫描 USB/网络打印机、选择受控驱动、创建队列、打印测试页，
+  并可将新生成的报告 PDF 自动提交到实体打印机。HP LaserJet Pro 400 M401 默认使用
+  通用黑白 PCL 6/PCL XL（pxlmono）；HL-1218W 使用 arm64 原生 `brlaser`。
 - 模拟U盘配置支持调整容量、卷标、去重、转换成功后自动删除及标志文件保护。
 - 报告日志支持直接下载板端留存的 PDF。
 - 网络配置页统一显示有线 IP、Wi-Fi 状态和附近网络，并支持无线连接、断开和忘记网络。
@@ -89,6 +92,7 @@ sudo ENABLE_SERVICES=0 START_SERVICES=0 bash scripts/install.sh
 gadget-mode.service
 gadget-collector.service
 gadget-web.service
+cups.service
 ```
 
 ## 本地验证

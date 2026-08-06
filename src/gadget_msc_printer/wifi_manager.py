@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import configparser
+import ipaddress
 import json
+import os
 import shutil
 import subprocess
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .config import HotspotConfig
@@ -46,9 +50,14 @@ def parse_nmcli_integer(value: str) -> int:
 class WifiManager:
     DEFAULT_HOTSPOT_CONNECTION = "gmp-hotspot"
 
-    def __init__(self, command_runner: CommandRunner | None = None) -> None:
+    def __init__(
+        self,
+        command_runner: CommandRunner | None = None,
+        networkd_profile_path: str | Path = "/etc/systemd/network/05-gadget-msc-printer-ethernet.network",
+    ) -> None:
         self._using_default_runner = command_runner is None
         self.command_runner = command_runner or self._default_runner
+        self.networkd_profile_path = Path(networkd_profile_path)
         self._hotspot_started_at: float | None = None
         self._hotspot_last_client_at: float | None = None
 
@@ -161,6 +170,108 @@ class WifiManager:
                 active.append({"name": parts[0], "type": parts[1], "device": parts[2]})
         return active
 
+    @staticmethod
+    def _split_ipv4_values(value: str) -> list[str]:
+        values: list[str] = []
+        for token in value.replace(";", ",").replace(" ", ",").split(","):
+            candidate = token.strip()
+            if not candidate:
+                continue
+            try:
+                values.append(str(ipaddress.IPv4Address(candidate)))
+            except ipaddress.AddressValueError:
+                continue
+        return values
+
+    def _device_dns(self, device: str) -> list[str]:
+        try:
+            output = self._run_command(["resolvectl", "dns", device], timeout=10)
+        except WifiError:
+            return []
+        values: list[str] = []
+        for line in output.splitlines():
+            payload = line.split(":", 1)[1] if ":" in line else line
+            for value in self._split_ipv4_values(payload):
+                if value not in values:
+                    values.append(value)
+        return values
+
+    def _connection_ipv4(self, connection: str, device: str) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ipv4_mode": "dhcp",
+            "configured_address": "",
+            "prefix_length": 24,
+            "configured_gateway": "",
+            "dns": [],
+        }
+        if not connection:
+            result["dns"] = self._device_dns(device)
+            return result
+        output = self._run(
+            [
+                "-t",
+                "-f",
+                "ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns",
+                "connection",
+                "show",
+                connection,
+            ]
+        )
+        fields: dict[str, str] = {}
+        for line in output.splitlines():
+            parts = split_nmcli_line(line)
+            if len(parts) >= 2:
+                fields[parts[0]] = parts[1]
+        method = fields.get("ipv4.method", "auto").strip().lower()
+        result["ipv4_mode"] = "manual" if method == "manual" else "dhcp"
+        configured = fields.get("ipv4.addresses", "").split(",", 1)[0].strip()
+        if configured:
+            address, _, prefix = configured.partition("/")
+            result["configured_address"] = address
+            if prefix.isdigit():
+                result["prefix_length"] = int(prefix)
+        result["configured_gateway"] = fields.get("ipv4.gateway", "").strip()
+        result["dns"] = self._split_ipv4_values(fields.get("ipv4.dns", ""))
+        if not result["dns"]:
+            result["dns"] = self._device_dns(device)
+        return result
+
+    def _networkd_ipv4(self, device: str, addresses: list[str], dynamic: bool) -> dict[str, Any]:
+        runtime_address = addresses[0] if addresses else ""
+        _, _, runtime_prefix = runtime_address.partition("/")
+        result: dict[str, Any] = {
+            "ipv4_mode": "dhcp" if dynamic or not runtime_address else "manual",
+            "configured_address": "" if dynamic else runtime_address.partition("/")[0],
+            "prefix_length": int(runtime_prefix) if runtime_prefix.isdigit() else 24,
+            "configured_gateway": "",
+            "dns": self._device_dns(device),
+        }
+        if not self.networkd_profile_path.exists():
+            return result
+
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        try:
+            parser.read(self.networkd_profile_path, encoding="utf-8")
+        except (OSError, configparser.Error):
+            return result
+        matched_device = parser.get("Match", "Name", fallback="").strip()
+        if matched_device not in {device, "e*"}:
+            return result
+        dhcp = parser.get("Network", "DHCP", fallback="no").strip().lower()
+        result["ipv4_mode"] = "dhcp" if dhcp in {"yes", "true", "ipv4"} else "manual"
+        configured = parser.get("Network", "Address", fallback="").strip()
+        if configured:
+            address, _, prefix = configured.partition("/")
+            result["configured_address"] = address
+            if prefix.isdigit():
+                result["prefix_length"] = int(prefix)
+        result["configured_gateway"] = parser.get("Route", "Gateway", fallback="").strip()
+        configured_dns = self._split_ipv4_values(parser.get("Network", "DNS", fallback=""))
+        if configured_dns:
+            result["dns"] = configured_dns
+        return result
+
     def status(self) -> dict[str, Any]:
         if shutil.which("nmcli") is None and self._using_default_runner:
             return {
@@ -206,6 +317,11 @@ class WifiManager:
             "frequency": 0,
             "channel": "",
             "autoconnect": False,
+            "ipv4_mode": "dhcp",
+            "configured_address": "",
+            "prefix_length": 24,
+            "configured_gateway": "",
+            "dns": [],
         }
         if not result["connected"]:
             return result
@@ -232,6 +348,11 @@ class WifiManager:
             result["autoconnect"] = len(profile) > 1 and profile[1].strip().lower() == "yes"
         except WifiError:
             result["ssid"] = connection_name
+
+        try:
+            result.update(self._connection_ipv4(connection_name, str(result["device"])))
+        except WifiError:
+            result["dns"] = self._device_dns(str(result["device"]))
 
         for network in self.scan(str(result["device"]), rescan=False):
             if network["active"] or network["ssid"] == result["ssid"]:
@@ -263,6 +384,10 @@ class WifiManager:
                 for address in item.get("addr_info", [])
                 if address.get("family") == "inet" and address.get("local")
             ]
+            dynamic = any(
+                address.get("family") == "inet" and bool(address.get("dynamic"))
+                for address in item.get("addr_info", [])
+            )
             flags = set(item.get("flags", []))
             connected = "LOWER_UP" in flags and bool(addresses)
             interfaces.append(
@@ -273,12 +398,13 @@ class WifiManager:
                     "addresses": addresses,
                     "gateway": gateways.get(name, ""),
                     "mac": str(item.get("address", "")),
+                    "dynamic": dynamic,
                 }
             )
         primary = next((item for item in interfaces if item["gateway"]), None)
         if primary is None:
             primary = next((item for item in interfaces if item["connected"]), None)
-        return {
+        result = {
             "available": bool(interfaces),
             "connected": bool(primary and primary["connected"]),
             "device": primary["device"] if primary else (interfaces[0]["device"] if interfaces else ""),
@@ -287,6 +413,229 @@ class WifiManager:
             "mac": primary["mac"] if primary else (interfaces[0]["mac"] if interfaces else ""),
             "interfaces": interfaces,
         }
+        if result["device"]:
+            selected = primary or interfaces[0]
+            ipv4 = self._networkd_ipv4(
+                str(result["device"]),
+                list(result["addresses"]),
+                bool(selected.get("dynamic")),
+            )
+            if ipv4["ipv4_mode"] == "manual" and not ipv4["configured_gateway"]:
+                ipv4["configured_gateway"] = result["gateway"]
+            result.update(ipv4)
+        else:
+            result.update(
+                ipv4_mode="dhcp",
+                configured_address="",
+                prefix_length=24,
+                configured_gateway="",
+                dns=[],
+            )
+        return result
+
+    @staticmethod
+    def _validate_ipv4_settings(
+        mode: str,
+        address: str,
+        prefix_length: int,
+        gateway: str,
+        dns: list[str] | tuple[str, ...] | str,
+    ) -> dict[str, Any]:
+        normalized_mode = mode.strip().lower()
+        if normalized_mode not in {"dhcp", "manual"}:
+            raise ValueError("IPv4 mode must be dhcp or manual")
+        if normalized_mode == "dhcp":
+            return {
+                "mode": "dhcp",
+                "address": "",
+                "prefix_length": 24,
+                "gateway": "",
+                "dns": [],
+            }
+
+        try:
+            prefix = int(prefix_length)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("prefix length must be an integer") from exc
+        if not 1 <= prefix <= 32:
+            raise ValueError("prefix length must be between 1 and 32")
+        try:
+            ipv4 = ipaddress.IPv4Address(address.strip())
+            gateway_ip = ipaddress.IPv4Address(gateway.strip())
+        except ipaddress.AddressValueError as exc:
+            raise ValueError("invalid IPv4 address or gateway") from exc
+        if ipv4.is_unspecified or ipv4.is_loopback or ipv4.is_multicast or ipv4.is_link_local:
+            raise ValueError("IPv4 address cannot be unspecified, loopback, multicast, or link-local")
+        network = ipaddress.IPv4Network(f"{ipv4}/{prefix}", strict=False)
+        if prefix <= 30 and ipv4 in {network.network_address, network.broadcast_address}:
+            raise ValueError("IPv4 address cannot be the subnet network or broadcast address")
+        if gateway_ip not in network or gateway_ip == ipv4:
+            raise ValueError("gateway must be in the same subnet and different from the device address")
+        if prefix <= 30 and gateway_ip in {network.network_address, network.broadcast_address}:
+            raise ValueError("gateway cannot be the subnet network or broadcast address")
+
+        raw_dns = [dns] if isinstance(dns, str) else list(dns)
+        dns_values: list[str] = []
+        for item in raw_dns:
+            for token in str(item).replace(";", ",").replace(" ", ",").split(","):
+                candidate = token.strip()
+                if not candidate:
+                    continue
+                try:
+                    dns_ip = ipaddress.IPv4Address(candidate)
+                except ipaddress.AddressValueError as exc:
+                    raise ValueError(f"invalid DNS server: {candidate}") from exc
+                if dns_ip.is_unspecified or dns_ip.is_loopback or dns_ip.is_multicast:
+                    raise ValueError(f"invalid DNS server: {candidate}")
+                value = str(dns_ip)
+                if value not in dns_values:
+                    dns_values.append(value)
+        if len(dns_values) > 3:
+            raise ValueError("at most three DNS servers are allowed")
+        return {
+            "mode": "manual",
+            "address": str(ipv4),
+            "prefix_length": prefix,
+            "gateway": str(gateway_ip),
+            "dns": dns_values,
+        }
+
+    def _write_networkd_ipv4(self, device: str, settings: dict[str, Any]) -> None:
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.optionxform = str
+        parser["Match"] = {"Name": device}
+        network: dict[str, str] = {
+            "DHCP": "yes" if settings["mode"] == "dhcp" else "ipv6",
+            "LinkLocalAddressing": "ipv6",
+            "IPv6PrivacyExtensions": "yes",
+        }
+        if settings["mode"] == "manual":
+            network["Address"] = f"{settings['address']}/{settings['prefix_length']}"
+            if settings["dns"]:
+                network["DNS"] = " ".join(settings["dns"])
+        parser["Network"] = network
+        if settings["mode"] == "dhcp":
+            parser["DHCP"] = {"RouteMetric": "100", "UseMTU": "true"}
+        else:
+            parser["Route"] = {
+                "Destination": "0.0.0.0/0",
+                "Gateway": settings["gateway"],
+                "Metric": "100",
+            }
+
+        self.networkd_profile_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.networkd_profile_path.with_name(f".{self.networkd_profile_path.name}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                parser.write(handle, space_around_delimiters=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, self.networkd_profile_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def configure_ipv4(
+        self,
+        interface_type: str,
+        mode: str,
+        address: str = "",
+        prefix_length: int = 24,
+        gateway: str = "",
+        dns: list[str] | tuple[str, ...] | str = (),
+        device: str = "",
+    ) -> dict[str, Any]:
+        kind = interface_type.strip().lower()
+        if kind not in {"ethernet", "wifi"}:
+            raise ValueError("interface type must be ethernet or wifi")
+        settings = self._validate_ipv4_settings(mode, address, prefix_length, gateway, dns)
+
+        if kind == "ethernet":
+            status = self.ethernet_status()
+            selected = self._validate_device(device or str(status.get("device", "")))
+            if not any(item.get("device") == selected for item in status.get("interfaces", [])):
+                raise ValueError("Ethernet device not found")
+            self._write_networkd_ipv4(selected, settings)
+            connection = ""
+            backend = "networkd"
+        else:
+            status = self.status()
+            if not status.get("connected") or not status.get("connection"):
+                raise ValueError("connect Wi-Fi before configuring its IPv4 address")
+            selected = self._validate_device(device or str(status.get("device", "")))
+            if selected != status.get("device"):
+                raise ValueError("selected Wi-Fi device is not connected")
+            connection = str(status["connection"])
+            arguments = ["connection", "modify", connection, "ipv4.method"]
+            if settings["mode"] == "dhcp":
+                arguments.extend(
+                    [
+                        "auto",
+                        "ipv4.addresses",
+                        "",
+                        "ipv4.gateway",
+                        "",
+                        "ipv4.dns",
+                        "",
+                        "ipv4.ignore-auto-dns",
+                        "no",
+                    ]
+                )
+            else:
+                arguments.extend(
+                    [
+                        "manual",
+                        "ipv4.addresses",
+                        f"{settings['address']}/{settings['prefix_length']}",
+                        "ipv4.gateway",
+                        settings["gateway"],
+                        "ipv4.dns",
+                        ",".join(settings["dns"]),
+                        "ipv4.ignore-auto-dns",
+                        "yes",
+                    ]
+                )
+            self._run(arguments, timeout=30)
+            backend = "networkmanager"
+
+        return {
+            "interface_type": kind,
+            "backend": backend,
+            "device": selected,
+            "connection": connection,
+            **settings,
+        }
+
+    def schedule_ipv4_activation(self, configuration: dict[str, Any], delay_seconds: int = 2) -> None:
+        backend = str(configuration.get("backend", ""))
+        device = self._validate_device(str(configuration.get("device", "")))
+        if backend == "networkd":
+            networkctl = shutil.which("networkctl") or "networkctl"
+            self._run_command([networkctl, "reload"], timeout=20)
+            activation = [networkctl, "reconfigure", device]
+        elif backend == "networkmanager":
+            connection = str(configuration.get("connection", "")).strip()
+            if not connection:
+                raise ValueError("Wi-Fi connection is required")
+            nmcli = shutil.which("nmcli") or "nmcli"
+            activation = [nmcli, "connection", "up", connection, "ifname", device]
+        else:
+            raise ValueError("unknown network backend")
+
+        systemd_run = shutil.which("systemd-run") or "systemd-run"
+        unit = f"gmp-network-apply-{time.time_ns()}"
+        self._run_command(
+            [
+                systemd_run,
+                "--quiet",
+                "--collect",
+                f"--unit={unit}",
+                f"--on-active={max(1, int(delay_seconds))}s",
+                "--",
+                *activation,
+            ],
+            timeout=20,
+        )
 
     def set_radio(self, enabled: bool) -> dict[str, Any]:
         self._run(["radio", "wifi", "on" if enabled else "off"])

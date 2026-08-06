@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from gadget_msc_printer.config import AppConfig
@@ -25,9 +27,19 @@ class StubRunner:
                 "GENERAL.STATE:100 (connected)\nGENERAL.CONNECTION:Xiaomi14\nIP4.ADDRESS[1]:10.119.184.41/24\nIP4.GATEWAY:10.119.184.80\n",
             ("-g", "802-11-wireless.ssid,connection.autoconnect", "connection", "show", "Xiaomi14"):
                 "Xiaomi14\nyes\n",
+            (
+                "-t",
+                "-f",
+                "ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns",
+                "connection",
+                "show",
+                "Xiaomi14",
+            ): "ipv4.method:auto\nipv4.addresses:\nipv4.gateway:\nipv4.dns:223.5.5.5\n",
             ("-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY,FREQ,CHAN", "device", "wifi", "list", "ifname", "wlan0"):
                 "*:Xiaomi14:78:WPA2:5180 MHz:36\n:Guest\\:Lab:52:--:2412 MHz:1\n",
         }
+        if key[:2] == ("connection", "modify"):
+            return subprocess.CompletedProcess(command, 0, "modified", "")
         if key not in outputs:
             return subprocess.CompletedProcess(command, 10, "", "unexpected command")
         return subprocess.CompletedProcess(command, 0, outputs[key], "")
@@ -48,6 +60,8 @@ class WifiManagerTests(unittest.TestCase):
         self.assertEqual(status["ssid"], "Xiaomi14")
         self.assertEqual(status["addresses"], ["10.119.184.41/24"])
         self.assertEqual(status["signal"], 78)
+        self.assertEqual(status["ipv4_mode"], "dhcp")
+        self.assertEqual(status["dns"], ["223.5.5.5"])
         networks = manager.scan("wlan0", rescan=False)
         self.assertEqual(networks[1]["ssid"], "Guest:Lab")
         self.assertNotIn("password", status)
@@ -76,9 +90,10 @@ class WifiManagerTests(unittest.TestCase):
                 ("ip", "-j", "address", "show"):
                     '[{"ifname":"eth0","link_type":"ether","operstate":"UP",'
                     '"flags":["UP","LOWER_UP"],"address":"00:11:22:33:44:55",'
-                    '"addr_info":[{"family":"inet","local":"192.168.20.144","prefixlen":24}]}]',
+                    '"addr_info":[{"family":"inet","local":"192.168.20.144","prefixlen":24,"dynamic":true}]}]',
                 ("ip", "-j", "route", "show", "default"):
                     '[{"dst":"default","gateway":"192.168.20.1","dev":"eth0"}]',
+                ("resolvectl", "dns", "eth0"): "Link 2 (eth0): 192.168.20.1 223.5.5.5\n",
             }
             output = outputs.get(tuple(command))
             if output is None:
@@ -90,6 +105,71 @@ class WifiManagerTests(unittest.TestCase):
         self.assertEqual(status["device"], "eth0")
         self.assertEqual(status["addresses"], ["192.168.20.144/24"])
         self.assertEqual(status["mac"], "00:11:22:33:44:55")
+        self.assertEqual(status["ipv4_mode"], "dhcp")
+        self.assertEqual(status["dns"], ["192.168.20.1", "223.5.5.5"])
+
+    def test_ethernet_static_ipv4_writes_isolated_networkd_profile(self) -> None:
+        def runner(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+            outputs = {
+                ("ip", "-j", "address", "show"):
+                    '[{"ifname":"eth0","link_type":"ether","operstate":"UP",'
+                    '"flags":["UP","LOWER_UP"],"address":"00:11:22:33:44:55",'
+                    '"addr_info":[{"family":"inet","local":"192.168.20.144","prefixlen":24,"dynamic":true}]}]',
+                ("ip", "-j", "route", "show", "default"):
+                    '[{"dst":"default","gateway":"192.168.20.1","dev":"eth0"}]',
+                ("resolvectl", "dns", "eth0"): "Link 2 (eth0): 192.168.20.1\n",
+            }
+            output = outputs.get(tuple(command))
+            if output is None:
+                return subprocess.CompletedProcess(command, 1, "", "unexpected command")
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "05-gateway-ethernet.network"
+            manager = WifiManager(runner, path)
+            configuration = manager.configure_ipv4(
+                "ethernet",
+                "manual",
+                "192.168.20.88",
+                24,
+                "192.168.20.1",
+                ["192.168.20.1", "223.5.5.5"],
+                "eth0",
+            )
+            profile = path.read_text(encoding="utf-8")
+
+        self.assertEqual(configuration["backend"], "networkd")
+        self.assertIn("Address=192.168.20.88/24", profile)
+        self.assertIn("DNS=192.168.20.1 223.5.5.5", profile)
+        self.assertIn("Gateway=192.168.20.1", profile)
+
+    def test_wifi_static_ipv4_modifies_current_profile(self) -> None:
+        runner = StubRunner()
+        manager = WifiManager(runner)
+        configuration = manager.configure_ipv4(
+            "wifi",
+            "manual",
+            "10.119.184.50",
+            24,
+            "10.119.184.80",
+            ["223.5.5.5"],
+            "wlan0",
+        )
+
+        self.assertEqual(configuration["backend"], "networkmanager")
+        command = next(item for item in runner.commands if item[1:3] == ["connection", "modify"])
+        self.assertIn("10.119.184.50/24", command)
+        self.assertIn("223.5.5.5", command)
+
+    def test_static_ipv4_rejects_gateway_outside_subnet(self) -> None:
+        with self.assertRaisesRegex(ValueError, "same subnet"):
+            WifiManager._validate_ipv4_settings(
+                "manual",
+                "192.168.20.88",
+                24,
+                "192.168.21.1",
+                ["223.5.5.5"],
+            )
 
     def test_hotspot_status_reports_clients_without_password(self) -> None:
         def runner(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:

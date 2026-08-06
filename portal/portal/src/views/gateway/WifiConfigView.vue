@@ -36,6 +36,62 @@
         <div><span>默认网关</span><strong>{{ wired.gateway || "-" }}</strong></div>
         <div><span>接口状态</span><strong>{{ wired.connected ? "链路正常" : "网线未连接" }}</strong></div>
       </div>
+      <div class="ipv4-config-panel">
+        <div class="ipv4-config-heading">
+          <div>
+            <h3>IPv4 地址配置</h3>
+            <span>当前方式：{{ ipv4ModeLabel(wired.ipv4_mode) }}</span>
+          </div>
+          <div class="ipv4-heading-actions">
+            <el-button
+              v-if="wiredIpForm.mode === 'manual'"
+              link
+              type="primary"
+              :icon="MagicStick"
+              @click="autoFillIpv4(wiredIpForm, true)"
+            >
+              自动填写网关和 DNS
+            </el-button>
+            <el-radio-group v-model="wiredIpForm.mode" size="small" @change="onIpv4ModeChange(wiredIpForm)">
+              <el-radio-button value="dhcp">自动获取（DHCP）</el-radio-button>
+              <el-radio-button value="manual">固定 IP</el-radio-button>
+            </el-radio-group>
+          </div>
+        </div>
+        <div class="ipv4-form-grid">
+          <label class="ipv4-field">
+            <span>IP 地址</span>
+            <el-input
+              v-model="wiredIpForm.address"
+              :disabled="wiredIpForm.mode === 'dhcp'"
+              placeholder="192.168.20.100"
+              @blur="autoFillIpv4(wiredIpForm)"
+            />
+          </label>
+          <label class="ipv4-field">
+            <span>子网前缀</span>
+            <el-select
+              v-model="wiredIpForm.prefix_length"
+              :disabled="wiredIpForm.mode === 'dhcp'"
+              @change="autoFillIpv4(wiredIpForm)"
+            >
+              <el-option v-for="item in prefixOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </label>
+          <label class="ipv4-field">
+            <span>默认网关</span>
+            <el-input v-model="wiredIpForm.gateway" :disabled="wiredIpForm.mode === 'dhcp'" placeholder="192.168.20.1" />
+          </label>
+          <label class="ipv4-field">
+            <span>DNS 服务器</span>
+            <el-input v-model="wiredIpForm.dns" :disabled="wiredIpForm.mode === 'dhcp'" placeholder="192.168.20.1, 223.5.5.5" />
+          </label>
+          <el-button class="ipv4-save" type="primary" :loading="wiredIpSaving" :disabled="!wired.available" @click="saveIpv4('ethernet')">
+            保存并应用
+          </el-button>
+        </div>
+        <p class="ipv4-note">修改当前管理网卡后连接会短暂中断；固定 IP 生效后请使用新地址重新访问。</p>
+      </div>
     </section>
 
     <section class="surface network-section wifi-section">
@@ -125,11 +181,82 @@
         </div>
       </el-form>
 
+      <div class="ipv4-config-panel" :class="{ 'is-disabled': !wifi.connected }">
+        <div class="ipv4-config-heading">
+          <div>
+            <h3>Wi-Fi IPv4 地址配置</h3>
+            <span>{{ wifi.connected ? `当前方式：${ipv4ModeLabel(wifi.ipv4_mode)}` : "连接 Wi-Fi 后可设置" }}</span>
+          </div>
+          <div class="ipv4-heading-actions">
+            <el-button
+              v-if="wifiIpForm.mode === 'manual'"
+              link
+              type="primary"
+              :icon="MagicStick"
+              :disabled="!wifi.connected"
+              @click="autoFillIpv4(wifiIpForm, true)"
+            >
+              自动填写网关和 DNS
+            </el-button>
+            <el-radio-group
+              v-model="wifiIpForm.mode"
+              size="small"
+              :disabled="!wifi.connected"
+              @change="onIpv4ModeChange(wifiIpForm)"
+            >
+              <el-radio-button value="dhcp">自动获取（DHCP）</el-radio-button>
+              <el-radio-button value="manual">固定 IP</el-radio-button>
+            </el-radio-group>
+          </div>
+        </div>
+        <div class="ipv4-form-grid">
+          <label class="ipv4-field">
+            <span>IP 地址</span>
+            <el-input
+              v-model="wifiIpForm.address"
+              :disabled="!wifi.connected || wifiIpForm.mode === 'dhcp'"
+              placeholder="192.168.20.101"
+              @blur="autoFillIpv4(wifiIpForm)"
+            />
+          </label>
+          <label class="ipv4-field">
+            <span>子网前缀</span>
+            <el-select
+              v-model="wifiIpForm.prefix_length"
+              :disabled="!wifi.connected || wifiIpForm.mode === 'dhcp'"
+              @change="autoFillIpv4(wifiIpForm)"
+            >
+              <el-option v-for="item in prefixOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </label>
+          <label class="ipv4-field">
+            <span>默认网关</span>
+            <el-input v-model="wifiIpForm.gateway" :disabled="!wifi.connected || wifiIpForm.mode === 'dhcp'" placeholder="192.168.20.1" />
+          </label>
+          <label class="ipv4-field">
+            <span>DNS 服务器</span>
+            <el-input v-model="wifiIpForm.dns" :disabled="!wifi.connected || wifiIpForm.mode === 'dhcp'" placeholder="192.168.20.1, 223.5.5.5" />
+          </label>
+          <el-button class="ipv4-save" type="primary" :loading="wifiIpSaving" :disabled="!wifi.connected" @click="saveIpv4('wifi')">
+            保存并应用
+          </el-button>
+        </div>
+        <p class="ipv4-note">此设置只修改当前连接的 Wi-Fi，维护热点地址仍保持 192.168.0.1。</p>
+      </div>
+
       <div class="nearby-heading">
         <h3>附近网络</h3>
         <span>{{ networks.length ? `发现 ${networks.length} 个网络` : "尚未扫描" }}</span>
       </div>
-      <el-table :data="networks" stripe height="205" highlight-current-row size="small" @row-click="selectNetwork">
+      <el-table
+        :data="networks"
+        stripe
+        height="205"
+        highlight-current-row
+        size="small"
+        class="desktop-only"
+        @row-click="selectNetwork"
+      >
         <el-table-column label="Wi-Fi 名称" min-width="280">
           <template #default="{ row }">
             <span class="wifi-network-name">
@@ -155,6 +282,23 @@
         </el-table-column>
         <template #empty><el-empty description="没有扫描结果" :image-size="58" /></template>
       </el-table>
+      <div class="mobile-only mobile-network-list">
+        <button
+          v-for="row in networks"
+          :key="`${row.ssid}-${row.frequency}`"
+          type="button"
+          class="mobile-network-row"
+          @click="selectNetwork(row)"
+        >
+          <span class="mobile-network-name">
+            <strong>{{ row.ssid }}</strong>
+            <small>{{ row.frequency >= 5000 ? "5 GHz" : "2.4 GHz" }} · {{ row.security }}</small>
+          </span>
+          <span class="mobile-network-signal">{{ row.signal }}%</span>
+          <el-tag v-if="row.active" type="success" effect="light" size="small">当前</el-tag>
+        </button>
+        <el-empty v-if="networks.length === 0" description="没有扫描结果" :image-size="58" />
+      </div>
     </section>
 
     <section class="surface network-section hotspot-section">
@@ -215,7 +359,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { Delete, Link, Refresh, Search, SwitchButton } from "@element-plus/icons-vue";
+import { Delete, Link, MagicStick, Refresh, Search, SwitchButton } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, errorMessage } from "@/api/client";
 
@@ -229,13 +373,28 @@ const forgetting = ref(false);
 const radioLoading = ref(false);
 const hotspotSaving = ref(false);
 const hotspotSwitching = ref(false);
+const wiredIpSaving = ref(false);
+const wifiIpSaving = ref(false);
 const radioEnabled = ref(false);
 const hotspotEnabled = ref(false);
 const hotspotInitialized = ref(false);
 const networks = ref([]);
 let refreshTimer;
 
-const wired = reactive({ available: false, connected: false, device: "", addresses: [], gateway: "", mac: "", interfaces: [] });
+const wired = reactive({
+  available: false,
+  connected: false,
+  device: "",
+  addresses: [],
+  gateway: "",
+  mac: "",
+  interfaces: [],
+  ipv4_mode: "dhcp",
+  configured_address: "",
+  prefix_length: 24,
+  configured_gateway: "",
+  dns: []
+});
 const wifi = reactive({
   available: false,
   error: "",
@@ -251,7 +410,12 @@ const wifi = reactive({
   signal: 0,
   security: "",
   frequency: 0,
-  autoconnect: false
+  autoconnect: false,
+  ipv4_mode: "dhcp",
+  configured_address: "",
+  prefix_length: 24,
+  configured_gateway: "",
+  dns: []
 });
 const hotspot = reactive({
   available: false,
@@ -267,6 +431,31 @@ const hotspot = reactive({
 });
 const wifiForm = reactive({ device: "", ssid: "", password: "", autoconnect: true, hidden: false });
 const hotspotForm = reactive({ ssid: "", password: "", autostart: false, idle_timeout_minutes: 30 });
+const wiredIpForm = reactive({
+  mode: "dhcp",
+  address: "",
+  prefix_length: 24,
+  gateway: "",
+  dns: "",
+  auto_gateway: "",
+  auto_dns: ""
+});
+const wifiIpForm = reactive({
+  mode: "dhcp",
+  address: "",
+  prefix_length: 24,
+  gateway: "",
+  dns: "",
+  auto_gateway: "",
+  auto_dns: ""
+});
+const wiredIpIdentity = ref("");
+const wifiIpIdentity = ref("");
+
+const prefixOptions = Array.from({ length: 30 }, (_, index) => {
+  const value = index + 1;
+  return { value, label: `/${value} · ${prefixToMask(value)}` };
+});
 
 const wiredIp = computed(() => (wired.addresses?.[0] || "").split("/")[0]);
 const wifiIp = computed(() => (wifi.addresses?.[0] || "").split("/")[0]);
@@ -279,6 +468,77 @@ const hotspotIdleText = computed(() => {
   return `${Math.ceil(seconds / 60)} 分钟后关闭`;
 });
 const requiredRules = (message) => [{ required: true, message, trigger: "change" }];
+
+function fillIpv4Form(form, status) {
+  const runtime = String(status.addresses?.[0] || "");
+  const [runtimeAddress, runtimePrefix] = runtime.split("/");
+  form.mode = status.ipv4_mode === "manual" ? "manual" : "dhcp";
+  form.address = status.configured_address || runtimeAddress || "";
+  form.prefix_length = Number(status.prefix_length || runtimePrefix || 24);
+  form.gateway = status.configured_gateway || status.gateway || "";
+  form.dns = Array.isArray(status.dns) ? status.dns.join(", ") : "";
+  form.auto_gateway = form.mode === "dhcp" ? form.gateway : "";
+  form.auto_dns = form.mode === "dhcp" ? form.dns : "";
+}
+
+function prefixToMask(prefix) {
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return [24, 16, 8, 0].map((shift) => (mask >>> shift) & 255).join(".");
+}
+
+function ipv4ToInteger(address) {
+  return address
+    .split(".")
+    .map(Number)
+    .reduce((value, part) => ((value << 8) | part) >>> 0, 0);
+}
+
+function integerToIpv4(value) {
+  return [24, 16, 8, 0].map((shift) => (value >>> shift) & 255).join(".");
+}
+
+function autoFillIpv4(form, force = false) {
+  if (form.mode !== "manual" || !isIpv4(form.address)) return;
+  const prefix = Number(form.prefix_length);
+  if (!Number.isInteger(prefix) || prefix < 1 || prefix > 30) return;
+
+  const address = ipv4ToInteger(form.address.trim());
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  const network = (address & mask) >>> 0;
+  const broadcast = (network | (~mask >>> 0)) >>> 0;
+  let gateway = (network + 1) >>> 0;
+  if (gateway === address) gateway = (gateway + 1) >>> 0;
+  if (gateway >= broadcast) return;
+
+  const generatedGateway = integerToIpv4(gateway);
+  const generatedDns = `${generatedGateway}, 223.5.5.5`;
+  const canReplaceGateway = force || !form.gateway || form.gateway === form.auto_gateway;
+  const canReplaceDns = force || !form.dns || form.dns === form.auto_dns;
+  if (canReplaceGateway) form.gateway = generatedGateway;
+  if (canReplaceDns) form.dns = generatedDns;
+  form.auto_gateway = generatedGateway;
+  form.auto_dns = generatedDns;
+}
+
+function onIpv4ModeChange(form) {
+  if (form.mode === "manual") autoFillIpv4(form);
+}
+
+function ipv4ModeLabel(mode) {
+  return mode === "manual" ? "固定 IP" : "自动获取（DHCP）";
+}
+
+function isIpv4(value) {
+  const parts = String(value || "").trim().split(".");
+  return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
+}
+
+function dnsValues(value) {
+  return String(value || "")
+    .split(/[\s,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
 function applyNetwork(data) {
   Object.assign(wired, data.ethernet || {});
@@ -295,9 +555,19 @@ function applyNetwork(data) {
   }
   if (!hotspotInitialized.value) {
     hotspotForm.ssid = hotspot.ssid;
-    hotspotForm.autoconnect = Boolean(hotspot.autostart);
+    hotspotForm.autostart = Boolean(hotspot.autostart);
     hotspotForm.idle_timeout_minutes = Number(hotspot.idle_timeout_minutes ?? 30);
     hotspotInitialized.value = true;
+  }
+  const nextWiredIdentity = wired.device || "none";
+  if (wiredIpIdentity.value !== nextWiredIdentity) {
+    fillIpv4Form(wiredIpForm, wired);
+    wiredIpIdentity.value = nextWiredIdentity;
+  }
+  const nextWifiIdentity = wifi.connected ? `${wifi.device}:${wifi.connection}` : "disconnected";
+  if (wifiIpIdentity.value !== nextWifiIdentity) {
+    fillIpv4Form(wifiIpForm, wifi);
+    wifiIpIdentity.value = nextWifiIdentity;
   }
 }
 
@@ -310,6 +580,93 @@ async function loadNetwork(showLoading = false) {
     if (showLoading) ElMessage.error(errorMessage(error, "加载网络状态失败"));
   } finally {
     if (showLoading) loading.value = false;
+  }
+}
+
+async function saveIpv4(interfaceType) {
+  const isEthernet = interfaceType === "ethernet";
+  const form = isEthernet ? wiredIpForm : wifiIpForm;
+  const status = isEthernet ? wired : wifi;
+  const saving = isEthernet ? wiredIpSaving : wifiIpSaving;
+  const label = isEthernet ? "有线网络" : "Wi-Fi";
+  if (!isEthernet && !wifi.connected) {
+    ElMessage.warning("请先连接 Wi-Fi，再配置固定地址");
+    return;
+  }
+
+  const dns = dnsValues(form.dns);
+  if (form.mode === "manual") {
+    if (!isIpv4(form.address)) {
+      ElMessage.error("请输入有效的固定 IP 地址");
+      return;
+    }
+    if (!isIpv4(form.gateway)) {
+      ElMessage.error("请输入有效的默认网关");
+      return;
+    }
+    if (dns.some((item) => !isIpv4(item))) {
+      ElMessage.error("DNS 服务器格式不正确，多个地址请用逗号分隔");
+      return;
+    }
+  }
+
+  const destination = form.mode === "manual" ? `${form.address}/${form.prefix_length}` : "由网络自动分配";
+  try {
+    await ElMessageBox.confirm(
+      `${label}将切换为“${ipv4ModeLabel(form.mode)}”，地址为 ${destination}。应用时该网卡会短暂断开。`,
+      "确认修改 IPv4 配置",
+      {
+        type: "warning",
+        confirmButtonText: "保存并应用",
+        cancelButtonText: "取消"
+      }
+    );
+  } catch {
+    return;
+  }
+
+  saving.value = true;
+  try {
+    const { data } = await api.put("/api/network/ipv4", {
+      interface_type: interfaceType,
+      device: status.device,
+      mode: form.mode,
+      address: form.mode === "manual" ? form.address.trim() : "",
+      prefix_length: Number(form.prefix_length),
+      gateway: form.mode === "manual" ? form.gateway.trim() : "",
+      dns: form.mode === "manual" ? dns : []
+    });
+    ElMessage.success("网络配置已保存，约 2 秒后应用");
+    window.setTimeout(() => loadNetwork(false), 5000);
+
+    if (data.mode === "manual") {
+      const target = new URL(window.location.href);
+      target.hostname = data.address;
+      try {
+        await ElMessageBox.confirm(
+          `固定 IP ${data.address} 生效后，可通过 ${target.origin} 继续访问。维护热点地址仍为 https://192.168.0.1。`,
+          "配置已保存",
+          {
+            type: "success",
+            confirmButtonText: "打开新地址",
+            cancelButtonText: "稍后处理"
+          }
+        );
+        window.setTimeout(() => window.location.assign(target.toString()), 3500);
+      } catch {
+        // Keep the current page open when another interface still provides connectivity.
+      }
+    } else {
+      await ElMessageBox.alert(
+        "DHCP 已保存。重新分配后 IP 可能变化，可从路由器租约或维护热点 https://192.168.0.1 查询新地址。",
+        "配置已保存",
+        { type: "success", confirmButtonText: "知道了" }
+      );
+    }
+  } catch (error) {
+    ElMessage.error(errorMessage(error, "保存 IPv4 配置失败"));
+  } finally {
+    saving.value = false;
   }
 }
 

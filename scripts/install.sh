@@ -35,7 +35,9 @@ if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-yaml python3-pil python3-aiohttp \
     dosfstools util-linux ghostscript openssl device-tree-compiler \
-    network-manager dnsmasq-base iptables
+    network-manager dnsmasq-base iptables \
+    cups cups-client cups-filters printer-driver-brlaser \
+    printer-driver-pxljr openprinting-ppds foomatic-db-compressed-ppds
 fi
 
 if ! command -v gpcl6 >/dev/null 2>&1 && ! command -v pcl6 >/dev/null 2>&1; then
@@ -118,6 +120,21 @@ commands = {
 }.get(printer["driver_profile"], "PJL,PCL,PCLXL,POSTSCRIPT,RAW")
 product = str(printer.get("usb_product", "K2B USB Printer"))
 printer["usb_pnp_string"] = f"MFG:JVLEI;MDL:{product};DES:{product};CMD:{commands};CLS:PRINTER;"
+physical = data.setdefault("physical_printer", {})
+physical.setdefault("enabled", False)
+physical.setdefault("auto_print", False)
+physical.setdefault("queue_name", "Physical_Printer")
+physical.setdefault("device_uri", "")
+physical.setdefault("driver_profile", "hp_laserjet_m401_pcl6")
+physical.setdefault("page_size", "A4")
+physical.setdefault("resolution", "600dpi")
+physical.setdefault("copies", 1)
+physical.setdefault("set_default", True)
+physical.setdefault("state_db", "/var/lib/gadget-msc-printer/state/physical_print_jobs.sqlite3")
+physical.setdefault("poll_interval_seconds", 0.5)
+physical.setdefault("file_stable_seconds", 2)
+physical.setdefault("retry_interval_seconds", 60)
+physical.setdefault("max_attempts", 3)
 text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
 fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
 try:
@@ -152,10 +169,11 @@ if [[ "$ENABLE_SERVICES" == "1" || "$START_SERVICES" == "1" ]]; then
 fi
 
 if [[ "$ENABLE_SERVICES" == "1" ]]; then
-  systemctl enable gadget-mode.service gadget-collector.service gadget-web.service
+  systemctl enable cups.service gadget-mode.service gadget-collector.service gadget-web.service
 fi
 
 if [[ "$START_SERVICES" == "1" ]]; then
+  systemctl restart cups.service
   systemctl restart gadget-mode.service
   systemctl restart gadget-collector.service
   systemctl restart gadget-web.service

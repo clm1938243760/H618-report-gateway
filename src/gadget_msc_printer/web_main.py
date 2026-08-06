@@ -11,7 +11,9 @@ from aiohttp import web
 
 from .auth import SessionStore
 from .config import load_config
+from .cups_manager import CupsManager
 from .maintenance import MaintenanceManager
+from .physical_print import PhysicalPrintWorker
 from .report_info import ReportInfoManager
 from .report_upload import ReportUploadWorker
 from .web import ConfigWebApp
@@ -30,6 +32,8 @@ async def main_async() -> None:
     report_info = ReportInfoManager(config.device)
     await asyncio.to_thread(report_info.ensure)
     uploader = ReportUploadWorker(config.upload, config.pdf, report_info)
+    cups = CupsManager()
+    physical_printer = PhysicalPrintWorker(config.physical_printer, config.pdf, cups)
     maintenance = MaintenanceManager(
         config.cleanup,
         config.runtime,
@@ -45,6 +49,8 @@ async def main_async() -> None:
         report_info,
         uploader,
         maintenance,
+        cups=cups,
+        physical_printer=physical_printer,
     )
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(config.web.tls_cert, config.web.tls_key)
@@ -70,6 +76,7 @@ async def main_async() -> None:
     upload_task = asyncio.create_task(uploader.run())
     maintenance_task = asyncio.create_task(maintenance.run())
     hotspot_task = asyncio.create_task(application.monitor_hotspot())
+    physical_print_task = asyncio.create_task(physical_printer.run())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -77,10 +84,18 @@ async def main_async() -> None:
     await stop.wait()
     uploader.stop()
     maintenance.stop()
+    physical_printer.stop()
     upload_task.cancel()
     maintenance_task.cancel()
     hotspot_task.cancel()
-    await asyncio.gather(upload_task, maintenance_task, hotspot_task, return_exceptions=True)
+    physical_print_task.cancel()
+    await asyncio.gather(
+        upload_task,
+        maintenance_task,
+        hotspot_task,
+        physical_print_task,
+        return_exceptions=True,
+    )
     await runner.cleanup()
 
 

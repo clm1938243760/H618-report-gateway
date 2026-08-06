@@ -30,6 +30,7 @@ gadget-web.service
   -> ReportJobStore (SQLite)
   -> ReportUploadWorker
   -> MaintenanceManager
+  -> PhysicalPrintWorker -> CUPS -> 实体打印机
 ```
 
 三个服务共享 `/etc/gadget-msc-printer/config.yaml`。配置和 XML 均通过临时文件、
@@ -106,6 +107,26 @@ HID 设备节点通常为 `/dev/hidg0` 和 `/dev/hidg1`，但主机侧功能枚�
 
 无法识别或转换时保留原始打印流并记录失败，不生成占位 PDF，防止上传错误报告。
 GhostPDL 使用 AGPL/商业双许可，量产前必须完成许可证评审。
+
+## 实体打印链路
+
+```text
+reports_pdf 新生成 PDF
+  -> PhysicalPrintWorker 稳定性检查和 SQLite 状态记录
+  -> CUPS 打印队列
+  -> brlaser / IPP Everywhere / 通用 PCL 或 PostScript 驱动
+  -> USB Host 或网络实体打印机
+```
+
+网页“实体打印机配置”调用 CUPS 标准命令扫描设备、列出已安装驱动、创建队列、设置
+默认队列、打印测试页及暂停/恢复/删除队列。网页只能从内置白名单中选择驱动配置，
+不能上传驱动或执行任意命令。HP LaserJet Pro 400 M401 使用 Foomatic 的通用黑白
+PCL 6/PCL XL `pxlmono` PPD；Brother HL-1218W 使用 Ubuntu arm64 仓库中的
+`printer-driver-brlaser`，映射为 Brother HL-1200 series。
+
+自动打印默认关闭。首次启动 `PhysicalPrintWorker` 时，系统把已有 PDF 记为历史基线，
+不会突然补打旧报告；之后新 PDF 使用独立 SQLite 状态机提交到 CUPS，失败按配置重试，
+且不影响原有报告上传任务。
 
 网页“模拟打印配置”只开放驱动声明、打印机名称、序列号、任务结束等待时间和最小
 任务大小。USB VID/PID 使用固定 Gadget 测试值，厂商固定为 `JVLEI`，这些字段不会由
