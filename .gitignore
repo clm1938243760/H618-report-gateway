@@ -10,6 +10,13 @@ build/
 *.prn
 *.pdf
 *.log
+*.jvpkg
+*.token
+*.pem
+*.key
+*.crt
+update_center/config.yaml
+update_center_data/
 output/
 tmp/
 .playwright-cli/

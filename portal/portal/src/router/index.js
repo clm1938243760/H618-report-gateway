@@ -55,6 +55,18 @@ const routes = [
         name: "maintenance",
         component: () => import("@/views/gateway/MaintenanceView.vue"),
         meta: { title: "存储与清理" }
+      },
+      {
+        path: "drivers",
+        name: "drivers",
+        component: () => import("@/views/gateway/DriverView.vue"),
+        meta: { title: "实体打印驱动" }
+      },
+      {
+        path: "update",
+        name: "update",
+        component: () => import("@/views/gateway/UpdateView.vue"),
+        meta: { title: "软件升级" }
       }
     ]
   },

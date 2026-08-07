@@ -61,9 +61,14 @@ DRIVER_PROFILES: tuple[dict[str, Any], ...] = (
 
 
 class CupsManager:
-    def __init__(self, command_runner: CommandRunner | None = None) -> None:
+    def __init__(
+        self,
+        command_runner: CommandRunner | None = None,
+        custom_profile_provider: Callable[[], list[dict[str, Any]]] | None = None,
+    ) -> None:
         self._using_default_runner = command_runner is None
         self.command_runner = command_runner or self._default_runner
+        self.custom_profile_provider = custom_profile_provider
 
     @staticmethod
     def _default_runner(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
@@ -169,15 +174,40 @@ class CupsManager:
                     installed_label=match["label"] if match else "",
                 )
             profiles.append(profile)
+        if self.custom_profile_provider is not None:
+            try:
+                supplied_profiles = self.custom_profile_provider()
+            except Exception:
+                supplied_profiles = []
+            for supplied in supplied_profiles:
+                if not isinstance(supplied, dict):
+                    continue
+                value = str(supplied.get("value", ""))
+                model = str(supplied.get("model", ""))
+                if not value.startswith("custom:") or not model:
+                    continue
+                model_path = Path(model)
+                profiles.append(
+                    {
+                        "value": value,
+                        "label": str(supplied.get("label", value)),
+                        "description": str(supplied.get("description", "现场导入驱动")),
+                        "available": model_path.is_file(),
+                        "model": str(model_path),
+                        "installed_label": str(supplied.get("installed_label", "")),
+                        "source_type": str(supplied.get("source_type", "")),
+                    }
+                )
         return profiles
 
-    def _model_for_profile(self, profile: str) -> str:
+    def _model_for_profile(self, profile: str) -> tuple[str, bool]:
         selected = next((item for item in self.driver_profiles() if item["value"] == profile), None)
         if selected is None:
             raise CupsError("unsupported physical printer driver profile")
         if not selected["available"] or not selected["model"]:
             raise CupsError(f"selected printer driver is not installed: {selected['label']}")
-        return str(selected["model"])
+        model = str(selected["model"])
+        return model, profile.startswith("custom:") and Path(model).is_file()
 
     def queues(self) -> list[dict[str, Any]]:
         # lpstat exits with status 1 when CUPS is healthy but no queue exists.
@@ -249,10 +279,11 @@ class CupsManager:
     def configure(self, config: PhysicalPrinterConfig) -> dict[str, Any]:
         if not config.device_uri:
             raise CupsError("physical printer device URI is required")
-        model = self._model_for_profile(config.driver_profile)
+        model, local_ppd = self._model_for_profile(config.driver_profile)
+        driver_option = ["-P", model] if local_ppd else ["-m", model]
         command = [
             "lpadmin", "-p", config.queue_name, "-E", "-v", config.device_uri,
-            "-m", model, "-o", f"PageSize={config.page_size}",
+            *driver_option, "-o", f"PageSize={config.page_size}",
             "-o", f"Resolution={config.resolution}", "-o", "printer-is-shared=false",
         ]
         self._run(command, timeout=60)

@@ -5,6 +5,9 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${DEST:-/opt/gadget-msc-printer}"
 CONFIG_DIR=/etc/gadget-msc-printer
 DATA_DIR=/var/lib/gadget-msc-printer
+UPDATER_CONFIG_DIR=/etc/jvlei-updater
+UPDATER_DATA_DIR=/var/lib/jvlei-updater
+UPDATER_ROOT=/usr/local/libexec/jvlei-updater
 ENABLE_SERVICES="${ENABLE_SERVICES:-1}"
 START_SERVICES="${START_SERVICES:-1}"
 INSTALL_K2B_USB0_OVERLAY="${INSTALL_K2B_USB0_OVERLAY:-auto}"
@@ -52,6 +55,24 @@ mkdir -p "$DEST" "$CONFIG_DIR" "$DATA_DIR"
 cp -a "$SRC"/. "$DEST"/
 rm -rf "$DEST/portal/portal/node_modules"
 find "$DEST/scripts" -type f -name '*.sh' -exec chmod 755 {} +
+
+APP_VERSION="$(python3 - <<PY
+from pathlib import Path
+for line in Path('$SRC/pyproject.toml').read_text(encoding='utf-8').splitlines():
+    if line.strip().startswith('version') and '=' in line:
+        print(line.split('=', 1)[1].strip().strip('"'))
+        break
+PY
+)"
+UPDATER_RELEASE="$UPDATER_ROOT/releases/$APP_VERSION"
+mkdir -p "$UPDATER_RELEASE" "$UPDATER_CONFIG_DIR" "$UPDATER_DATA_DIR"
+rm -rf "$UPDATER_RELEASE/jvlei_update"
+cp -a "$SRC/src/jvlei_update" "$UPDATER_RELEASE/jvlei_update"
+ln -sfn "$UPDATER_RELEASE" "$UPDATER_ROOT/current.next"
+mv -Tf "$UPDATER_ROOT/current.next" "$UPDATER_ROOT/current"
+if [[ ! -s "$UPDATER_CONFIG_DIR/config.yaml" ]]; then
+  install -m 0640 "$SRC/updater.example.yaml" "$UPDATER_CONFIG_DIR/config.yaml"
+fi
 
 K2B_OVERLAY_SELECTED=0
 BOARD_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
@@ -159,6 +180,7 @@ python3 -m venv --system-site-packages "$DEST/.venv"
 install -m 0644 "$DEST/systemd/gadget-mode.service" /etc/systemd/system/gadget-mode.service
 install -m 0644 "$DEST/systemd/gadget-collector.service" /etc/systemd/system/gadget-collector.service
 install -m 0644 "$DEST/systemd/gadget-web.service" /etc/systemd/system/gadget-web.service
+install -m 0644 "$DEST/systemd/jvlei-updater.service" /etc/systemd/system/jvlei-updater.service
 systemctl daemon-reload
 
 if [[ "$ENABLE_SERVICES" == "1" || "$START_SERVICES" == "1" ]]; then
@@ -169,7 +191,7 @@ if [[ "$ENABLE_SERVICES" == "1" || "$START_SERVICES" == "1" ]]; then
 fi
 
 if [[ "$ENABLE_SERVICES" == "1" ]]; then
-  systemctl enable cups.service gadget-mode.service gadget-collector.service gadget-web.service
+  systemctl enable cups.service gadget-mode.service gadget-collector.service gadget-web.service jvlei-updater.service
 fi
 
 if [[ "$START_SERVICES" == "1" ]]; then
@@ -177,6 +199,7 @@ if [[ "$START_SERVICES" == "1" ]]; then
   systemctl restart gadget-mode.service
   systemctl restart gadget-collector.service
   systemctl restart gadget-web.service
+  systemctl restart jvlei-updater.service
 fi
 
 echo "Installed to $DEST"

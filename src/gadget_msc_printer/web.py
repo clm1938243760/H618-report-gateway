@@ -4,8 +4,10 @@ import asyncio
 import copy
 import hmac
 import logging
+import os
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -27,11 +29,13 @@ from .config import (
     validate_config,
 )
 from .cups_manager import CupsError, CupsManager
+from .driver_manager import DriverError, DriverManager, MAX_DRIVER_BYTES
 from .maintenance import MaintenanceManager
 from .physical_print import PhysicalPrintWorker
 from .prn_analyzer import analyze_recent_prn
 from .report_info import ReportInfoManager
 from .report_upload import ReportUploadWorker
+from .updater_client import UpdaterClient, UpdaterClientError
 from .wifi_manager import WifiError, WifiManager
 
 LOGGER = logging.getLogger(__name__)
@@ -54,6 +58,8 @@ class ConfigWebApp:
         wifi: WifiManager | None = None,
         cups: CupsManager | None = None,
         physical_printer: PhysicalPrintWorker | None = None,
+        driver_manager: DriverManager | None = None,
+        updater_client: UpdaterClient | None = None,
     ) -> None:
         self.config_path = Path(config_path)
         self.config = config
@@ -62,13 +68,18 @@ class ConfigWebApp:
         self.uploader = uploader
         self.maintenance = maintenance
         self.wifi = wifi or WifiManager()
-        self.cups = cups or CupsManager()
+        self.driver_manager = driver_manager or DriverManager()
+        self.cups = cups or CupsManager(custom_profile_provider=self.driver_manager.profiles)
+        self.updater = updater_client or UpdaterClient()
         self.physical_printer = physical_printer or PhysicalPrintWorker(
             config.physical_printer, config.pdf, self.cups
         )
         self.hotspot_lock = asyncio.Lock()
         self.login_failures: dict[str, list[float]] = {}
-        self.app = web.Application(middlewares=[self.security_middleware])
+        self.app = web.Application(
+            middlewares=[self.security_middleware],
+            client_max_size=MAX_DRIVER_BYTES + 8 * 1024 * 1024,
+        )
         self.app.add_routes(
             [
                 web.get("/health", self.health),
@@ -92,6 +103,10 @@ class ConfigWebApp:
                 web.post("/api/physical-printer/test", self.test_physical_printer),
                 web.post("/api/physical-printer/control", self.control_physical_printer),
                 web.delete("/api/physical-printer/queue", self.delete_physical_printer),
+                web.get("/api/drivers", self.get_drivers),
+                web.post("/api/drivers/analyze", self.analyze_driver),
+                web.post("/api/drivers/install", self.install_driver),
+                web.post("/api/drivers/rollback", self.rollback_driver),
                 web.get("/api/msc/config", self.get_msc_config),
                 web.put("/api/msc/config", self.put_msc_config),
                 web.post("/api/msc/rebuild", self.rebuild_msc),
@@ -112,6 +127,13 @@ class ConfigWebApp:
                 web.put("/api/network/ipv4", self.put_network_ipv4),
                 web.put("/api/hotspot/config", self.put_hotspot_config),
                 web.post("/api/hotspot/switch", self.switch_hotspot),
+                web.get("/api/update/status", self.update_status),
+                web.post("/api/update/pair", self.update_pair),
+                web.post("/api/update/check", self.update_check),
+                web.post("/api/update/download", self.update_download),
+                web.post("/api/update/install", self.update_install),
+                web.post("/api/update/rollback", self.update_rollback),
+                web.put("/api/update/policy", self.update_policy),
             ]
         )
 
@@ -135,7 +157,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.20.0"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.21.0"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
@@ -574,6 +596,123 @@ class ConfigWebApp:
         self.physical_printer.update_config(config.physical_printer)
         self.physical_printer.wake()
         return web.json_response({"ok": True})
+
+    async def get_drivers(self, request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "ok": True,
+                "drivers": await asyncio.to_thread(self.driver_manager.drivers),
+                "profiles": await asyncio.to_thread(self.driver_manager.profiles),
+            }
+        )
+
+    async def analyze_driver(self, request: web.Request) -> web.Response:
+        """Stage and inspect a local Linux printer driver without installing it."""
+
+        try:
+            reader = await request.multipart()
+            field = await reader.next()
+            if field is None or field.name != "driver" or not field.filename:
+                raise DriverError("请选择一个驱动文件")
+            self.driver_manager.staging_dir.mkdir(parents=True, exist_ok=True)
+            temporary_path: Path | None = None
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".driver-upload-",
+                dir=str(self.driver_manager.staging_dir),
+            )
+            temporary_path = Path(temporary_name)
+            total = 0
+            try:
+                with open(descriptor, "wb", closefd=True) as handle:
+                    while True:
+                        chunk = await field.read_chunk(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_DRIVER_BYTES:
+                            raise DriverError("驱动文件超过 512 MB 限制")
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                staged = await asyncio.to_thread(
+                    self.driver_manager.stage_upload,
+                    str(field.filename),
+                    temporary_path,
+                )
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
+        except (DriverError, OSError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "upload": staged})
+
+    async def install_driver(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            upload_id = str(payload.get("upload_id", ""))
+            confirm_scripts = payload.get("confirm_scripts") is True
+            result = await asyncio.to_thread(
+                self.driver_manager.install,
+                upload_id,
+                confirm_scripts,
+            )
+        except (DriverError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **result})
+
+    async def rollback_driver(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            backup_id = str(payload.get("backup_id", ""))
+            result = await asyncio.to_thread(self.driver_manager.rollback, backup_id)
+        except (DriverError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **result})
+
+    async def update_status(self, request: web.Request) -> web.Response:
+        return web.json_response(await self.updater.status())
+
+    async def update_pair(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        code = str(payload.get("pairing_code", "")).strip()
+        if not 1 <= len(code) <= 128:
+            return web.json_response({"ok": False, "error": "配对码格式无效"}, status=400)
+        try:
+            return web.json_response(await self.updater.pair(code))
+        except UpdaterClientError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+
+    async def update_check(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await self.updater.check())
+        except UpdaterClientError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+
+    async def update_download(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await self.updater.download())
+        except UpdaterClientError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+
+    async def update_install(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await self.updater.install())
+        except UpdaterClientError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+
+    async def update_rollback(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await self.updater.rollback())
+        except UpdaterClientError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
+
+    async def update_policy(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        policy = str(payload.get("install_policy", "")).strip()
+        try:
+            return web.json_response(await self.updater.set_policy(policy))
+        except UpdaterClientError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=503)
 
     @staticmethod
     def _physical_printer_payload(config: AppConfig) -> dict[str, Any]:

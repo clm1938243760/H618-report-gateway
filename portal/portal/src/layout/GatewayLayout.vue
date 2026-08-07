@@ -114,6 +114,7 @@ import {
   Coin,
   Connection,
   Document,
+  Download,
   Menu,
   Printer,
   Setting,
@@ -133,9 +134,11 @@ const navigation = [
   { path: "/reports", label: "报告日志", icon: Document },
   { path: "/printer", label: "模拟打印配置", icon: Printer },
   { path: "/physical-printer", label: "实体打印机配置", icon: Printer },
+  { path: "/drivers", label: "实体打印驱动", icon: Printer },
   { path: "/msc", label: "模拟U盘配置", icon: Coin },
   { path: "/wifi", label: "网络配置", icon: Connection },
-  { path: "/maintenance", label: "存储与清理", icon: Clock }
+  { path: "/maintenance", label: "存储与清理", icon: Clock },
+  { path: "/update", label: "软件升级", icon: Download }
 ];
 
 async function handleUserCommand(command) {

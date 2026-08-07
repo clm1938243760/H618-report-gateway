@@ -1,0 +1,17 @@
+[Unit]
+Description=JVLEI outbound software update agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/usr/local/libexec/jvlei-updater/current:/opt/gadget-msc-printer/src
+ExecStart=/usr/bin/python3 -m jvlei_update.updater_main --config /etc/jvlei-updater/config.yaml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

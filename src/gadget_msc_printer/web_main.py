@@ -12,6 +12,7 @@ from aiohttp import web
 from .auth import SessionStore
 from .config import load_config
 from .cups_manager import CupsManager
+from .driver_manager import DriverManager
 from .maintenance import MaintenanceManager
 from .physical_print import PhysicalPrintWorker
 from .report_info import ReportInfoManager
@@ -32,7 +33,8 @@ async def main_async() -> None:
     report_info = ReportInfoManager(config.device)
     await asyncio.to_thread(report_info.ensure)
     uploader = ReportUploadWorker(config.upload, config.pdf, report_info)
-    cups = CupsManager()
+    driver_manager = DriverManager()
+    cups = CupsManager(custom_profile_provider=driver_manager.profiles)
     physical_printer = PhysicalPrintWorker(config.physical_printer, config.pdf, cups)
     maintenance = MaintenanceManager(
         config.cleanup,
@@ -51,6 +53,7 @@ async def main_async() -> None:
         maintenance,
         cups=cups,
         physical_printer=physical_printer,
+        driver_manager=driver_manager,
     )
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(config.web.tls_cert, config.web.tls_key)

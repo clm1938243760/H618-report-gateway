@@ -29,6 +29,18 @@ PHYSICAL_PRINTER_DRIVER_PROFILES = frozenset(
         "generic_pcl6",
     }
 )
+
+
+def is_supported_physical_printer_driver(profile: str) -> bool:
+    """Accept bundled profiles and reviewed driver records only.
+
+    A ``custom:`` value is never an arbitrary command or file path.  The CUPS
+    layer resolves it through the reviewed local driver registry before use.
+    """
+
+    return profile in PHYSICAL_PRINTER_DRIVER_PROFILES or re.fullmatch(
+        r"custom:[a-z0-9][a-z0-9._-]{0,127}", profile
+    ) is not None
 FIXED_PRINTER_VENDOR_ID = "0x0525"
 FIXED_PRINTER_PRODUCT_ID = "0xa4a8"
 FIXED_PRINTER_MANUFACTURER = "JVLEI"
@@ -356,7 +368,7 @@ def validate_config(config: AppConfig) -> None:
         or re.fullmatch(r"[A-Za-z0-9._-]+", config.physical_printer.queue_name) is None
     ):
         raise ValueError("physical_printer.queue_name contains invalid characters")
-    if config.physical_printer.driver_profile not in PHYSICAL_PRINTER_DRIVER_PROFILES:
+    if not is_supported_physical_printer_driver(config.physical_printer.driver_profile):
         raise ValueError("physical_printer.driver_profile is not supported")
     if config.physical_printer.device_uri:
         device_uri = urlparse(config.physical_printer.device_uri)

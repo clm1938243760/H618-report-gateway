@@ -6,10 +6,12 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import AsyncMock, patch
 
+from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from gadget_msc_printer.auth import SessionStore
 from gadget_msc_printer.config import AppConfig, load_config, save_config
+from gadget_msc_printer.driver_manager import DriverManager
 from gadget_msc_printer.maintenance import MaintenanceManager
 from gadget_msc_printer.report_info import ReportInfoManager
 from gadget_msc_printer.report_upload import ReportUploadWorker
@@ -202,6 +204,68 @@ class FakeCupsManager:
         self.deleted = True
 
 
+class FakeUpdaterClient:
+    def __init__(self) -> None:
+        self.policy = "local_confirm"
+        self.paired = False
+        self.calls: list[str] = []
+
+    def _status(self):
+        return {
+            "ok": True,
+            "available": True,
+            "paired": self.paired,
+            "agent_id": "h618-test" if self.paired else "",
+            "center_url": "https://update.example.test",
+            "install_policy": self.policy,
+            "allow_unsigned_packages": False,
+            "current_version": "0.20.0",
+            "previous_version": "0.19.0",
+            "assignment": None,
+            "download": None,
+            "last_check_at": 0,
+            "last_success_at": 0,
+            "last_error": "",
+        }
+
+    async def status(self):
+        return self._status()
+
+    async def pair(self, pairing_code: str):
+        self.calls.append(f"pair:{pairing_code}")
+        self.paired = True
+        return self._status()
+
+    async def check(self):
+        self.calls.append("check")
+        value = self._status()
+        value["assignment"] = {"id": "assignment-1", "action": "download", "status": "queued", "package": {"version": "0.21.0"}}
+        return value
+
+    async def download(self):
+        self.calls.append("download")
+        value = self._status()
+        value["download"] = {"ready": True, "manifest": {"version": "0.21.0"}, "signed": True}
+        return value
+
+    async def install(self):
+        self.calls.append("install")
+        value = self._status()
+        value["current_version"] = "0.21.0"
+        return value
+
+    async def rollback(self):
+        self.calls.append("rollback")
+        value = self._status()
+        value["current_version"] = "0.19.0"
+        return value
+
+    async def set_policy(self, install_policy: str):
+        self.calls.append(f"policy:{install_policy}")
+        self.policy = install_policy
+        return self._status()
+
+
 class WebTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -248,6 +312,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         )
         self.wifi = FakeWifiManager()
         self.cups = FakeCupsManager()
+        self.updater = FakeUpdaterClient()
+        self.driver_manager = DriverManager(root=root / "drivers")
         self.web = ConfigWebApp(
             self.config_path,
             config,
@@ -257,6 +323,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             self.maintenance,
             self.wifi,
             self.cups,
+            driver_manager=self.driver_manager,
+            updater_client=self.updater,
         )
         self.client = TestClient(TestServer(self.web.app))
         await self.client.start_server()
@@ -278,6 +346,58 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_api_requires_login(self) -> None:
         response = await self.client.get("/api/config")
         self.assertEqual(response.status, 401)
+
+    async def test_update_proxy_requires_session_and_forwards_board_actions(self) -> None:
+        response = await self.client.get("/api/update/status")
+        self.assertEqual(response.status, 401)
+        token, csrf = await self._login()
+        headers = {"Cookie": f"gmp_session={token}", "X-CSRF-Token": csrf}
+
+        response = await self.client.get("/api/update/status", headers=headers)
+        payload = await response.json()
+        self.assertTrue(payload["available"])
+        self.assertFalse(payload["paired"])
+
+        response = await self.client.post("/api/update/pair", headers=headers, json={"pairing_code": "A2F6M8"})
+        self.assertEqual(response.status, 200)
+        self.assertTrue((await response.json())["paired"])
+
+        response = await self.client.post("/api/update/check", headers=headers, json={})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["assignment"]["package"]["version"], "0.21.0")
+
+        response = await self.client.post("/api/update/download", headers=headers, json={})
+        self.assertEqual(response.status, 200)
+        self.assertTrue((await response.json())["download"]["ready"])
+
+        response = await self.client.put(
+            "/api/update/policy",
+            headers=headers,
+            json={"install_policy": "remote_allowed"},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["install_policy"], "remote_allowed")
+        self.assertIn("download", self.updater.calls)
+        self.assertIn("policy:remote_allowed", self.updater.calls)
+
+    async def test_driver_upload_is_analyzed_before_installation(self) -> None:
+        token, csrf = await self._login()
+        form = FormData()
+        form.add_field(
+            "driver",
+            b'*PPD-Adobe: "4.3"\n*Manufacturer: "JVLEI"\n*ModelName: "Test Printer"\n',
+            filename="test-printer.ppd",
+            content_type="application/vnd.cups-ppd",
+        )
+        response = await self.client.post(
+            "/api/drivers/analyze",
+            headers={"Cookie": f"gmp_session={token}", "X-CSRF-Token": csrf},
+            data=form,
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertTrue(payload["upload"]["analysis"]["supported"])
+        self.assertEqual(payload["upload"]["analysis"]["source_type"], "ppd")
 
     async def test_wifi_status_scan_connect_disconnect_and_forget(self) -> None:
         token, csrf = await self._login()
