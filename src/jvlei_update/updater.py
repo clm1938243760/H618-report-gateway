@@ -151,7 +151,10 @@ class ApplicationInstaller:
         )
 
     def _run(self, command: list[str], timeout: int = 120) -> str:
-        result = self.command_runner(command, timeout)
+        try:
+            result = self.command_runner(command, timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise UpdaterError(f"{' '.join(command)} timed out after {timeout} seconds") from exc
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "command failed").strip()
             raise UpdaterError(f"{' '.join(command)}: {detail}")
@@ -228,7 +231,13 @@ class ApplicationInstaller:
             raise
 
     def _stop_services(self) -> None:
-        self._run(["systemctl", "stop", *self.SERVICES], timeout=60)
+        self._run(["systemctl", "stop", *self.SERVICES], timeout=120)
+
+    def _restart_services_after_failure(self) -> None:
+        try:
+            self._start_services({"requires_cups_restart": False, "requires_gadget_restart": False})
+        except Exception:
+            LOGGER.exception("failed to restart gateway services after update error")
 
     def _wait_for_active_reports(self) -> None:
         """Let an in-flight upload finish without blocking a pending queue forever."""
@@ -351,9 +360,9 @@ class ApplicationInstaller:
                         os.replace(imported_previous, app)
                     else:
                         self._atomic_symlink(imported_previous, app)
-                    self._start_services({"requires_cups_restart": False, "requires_gadget_restart": False})
                 except Exception:
                     LOGGER.exception("automatic application rollback failed")
+            self._restart_services_after_failure()
             shutil.rmtree(new_release, ignore_errors=True)
             shutil.rmtree(new_updater_release, ignore_errors=True)
             raise
@@ -393,18 +402,29 @@ class ApplicationInstaller:
         current_updater = updater_current.resolve() if updater_current.is_symlink() else None
         previous_updater_value = str(state.get("previous_updater_release", ""))
         previous_updater = Path(previous_updater_value) if previous_updater_value else None
-        self._stop_services()
+        switched = False
+        updater_switched = False
         try:
+            self._stop_services()
             self._atomic_symlink(previous, app)
+            switched = True
             self._start_services({"requires_cups_restart": False, "requires_gadget_restart": False})
             self._health_check(self.current_version(previous))
             if previous_updater is not None and previous_updater.is_dir():
                 self._atomic_symlink(previous_updater, updater_current)
+                updater_switched = True
         except Exception:
-            self._atomic_symlink(current, app)
-            if current_updater is not None:
-                self._atomic_symlink(current_updater, updater_current)
-            self._start_services({"requires_cups_restart": False, "requires_gadget_restart": False})
+            if switched:
+                try:
+                    self._atomic_symlink(current, app)
+                except Exception:
+                    LOGGER.exception("manual rollback recovery could not restore the application link")
+            if updater_switched and current_updater is not None:
+                try:
+                    self._atomic_symlink(current_updater, updater_current)
+                except Exception:
+                    LOGGER.exception("manual rollback recovery could not restore the updater link")
+            self._restart_services_after_failure()
             raise
         old_current_version = str(state.get("current_version", self.current_version(current)))
         state.update(

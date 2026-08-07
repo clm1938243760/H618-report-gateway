@@ -5,7 +5,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import Mock, patch
 
 import yaml
@@ -88,6 +88,7 @@ def build_installable_application_package(path: Path, version: str = "0.21.0") -
     files = {
         "pyproject.toml": f'[project]\nname = "gateway"\nversion = "{version}"\n'.encode(),
         "src/gadget_msc_printer/__init__.py": b"",
+        "src/jvlei_update/__init__.py": b"",
         "scripts/placeholder.py": b"",
         "scripts/apply_gadget_mode.sh": b"#!/bin/sh\nexit 0\n",
         "portal/portal/dist/index.html": b"<!doctype html>",
@@ -306,6 +307,51 @@ class ApplicationReleasePreparationTests(unittest.TestCase):
             release = installer._prepare_updater_release(application, "0.21.1")  # noqa: SLF001
             self.assertEqual((release / "VERSION").read_text(encoding="ascii"), "0.21.1\n")
             self.assertTrue((release / "jvlei_update" / "updater.py").is_file())
+
+
+class ApplicationInstallerFailureRecoveryTests(unittest.TestCase):
+    def test_service_stop_timeout_still_restarts_current_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            application = root / "application"
+            application.mkdir()
+            (application / "VERSION").write_text("0.20.0\n", encoding="ascii")
+            package_path = root / "gateway.jvpkg"
+            build_installable_application_package(package_path)
+            work_root = root / "work"
+            work_root.mkdir()
+            package = verify_package(package_path, public_key=None, allow_unsigned=True, work_root=work_root)
+            commands: list[list[str]] = []
+
+            def runner(command: list[str], timeout: int) -> CompletedProcess[str]:
+                commands.append(command)
+                if command[:2] == ["systemctl", "stop"]:
+                    raise TimeoutExpired(command, timeout)
+                return CompletedProcess(command, 0, "", "")
+
+            config = UpdaterConfig(
+                state_dir=str(root / "state"),
+                application_path=str(application),
+                release_root=str(root / "releases"),
+                updater_release_root=str(root / "updater-releases"),
+                updater_current_path=str(root / "updater-current"),
+                active_task_wait_seconds=0,
+            )
+            installer = ApplicationInstaller(
+                config,
+                StateStore(root / "state" / "state.json"),
+                command_runner=runner,
+                prepare_runtime=False,
+            )
+            try:
+                with self.assertRaisesRegex(UpdaterError, "timed out after 120 seconds"):
+                    installer.install(package)
+            finally:
+                package.cleanup()
+
+            self.assertTrue(application.is_dir())
+            self.assertFalse(application.is_symlink())
+            self.assertTrue(any(command[:2] == ["systemctl", "restart"] for command in commands))
 
 
 @unittest.skipUnless(SUPPORTS_DIRECTORY_SYMLINKS, "directory symlink support is required for Linux release switching")
