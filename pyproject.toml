@@ -1,6 +1,6 @@
 [project]
 name = "gadget-msc-printer"
-version = "0.21.1"
+version = "0.21.2"
 description = "Standalone USB mass-storage and printer gadget collector"
 requires-python = ">=3.9"
 dependencies = [
