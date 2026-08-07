@@ -15,7 +15,7 @@ from aiohttp.test_utils import TestServer
 from jvlei_update.package import build_package, sha256_file, verify_package
 from jvlei_update.updater import ApplicationInstaller, StateStore, UpdaterConfig, UpdaterError, UpdaterService
 from update_center.run import install_signal_handlers
-from update_center.server import CenterStore
+from update_center.server import DASHBOARD_HTML, CenterStore
 
 
 def supports_directory_symlinks() -> bool:
@@ -41,6 +41,12 @@ class UpdateCenterRuntimeTests(unittest.TestCase):
                 raise NotImplementedError
 
         self.assertFalse(install_signal_handlers(UnsupportedSignalLoop(), Mock()))
+
+    def test_dashboard_assignment_buttons_do_not_generate_invalid_javascript(self) -> None:
+        self.assertNotIn("assign(''+x.agent_id", DASHBOARD_HTML)
+        self.assertIn('data-action="download"', DASHBOARD_HTML)
+        self.assertIn('data-action="install"', DASHBOARD_HTML)
+        self.assertIn("assign(this.dataset.agent,this.dataset.action)", DASHBOARD_HTML)
 
 
 def build_test_package(
