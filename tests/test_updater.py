@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 from aiohttp import web
@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestServer
 
 from jvlei_update.package import build_package, sha256_file, verify_package
 from jvlei_update.updater import ApplicationInstaller, StateStore, UpdaterConfig, UpdaterError, UpdaterService
+from update_center.run import install_signal_handlers
 from update_center.server import CenterStore
 
 
@@ -31,6 +32,15 @@ def supports_directory_symlinks() -> bool:
 
 
 SUPPORTS_DIRECTORY_SYMLINKS = supports_directory_symlinks()
+
+
+class UpdateCenterRuntimeTests(unittest.TestCase):
+    def test_windows_event_loop_without_signal_handlers_is_supported(self) -> None:
+        class UnsupportedSignalLoop:
+            def add_signal_handler(self, sig, callback) -> None:
+                raise NotImplementedError
+
+        self.assertFalse(install_signal_handlers(UnsupportedSignalLoop(), Mock()))
 
 
 def build_test_package(
