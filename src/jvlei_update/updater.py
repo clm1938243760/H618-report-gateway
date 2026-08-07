@@ -51,6 +51,8 @@ class UpdaterConfig:
     state_dir: str = "/var/lib/jvlei-updater"
     application_path: str = "/opt/gadget-msc-printer"
     release_root: str = "/opt/jvlei/releases/gateway"
+    updater_release_root: str = "/usr/local/libexec/jvlei-updater/releases"
+    updater_current_path: str = "/usr/local/libexec/jvlei-updater/current"
     data_dir: str = "/var/lib/gadget-msc-printer"
     active_task_wait_seconds: int = 90
     driver_root: str = "/var/lib/gadget-msc-printer/drivers"
@@ -161,6 +163,39 @@ class ApplicationInstaller:
         temporary.symlink_to(target, target_is_directory=True)
         os.replace(temporary, link)
 
+    def _prepare_python_runtime(self, release: Path) -> None:
+        venv = release / ".venv"
+        self._run(["python3", "-m", "venv", "--system-site-packages", str(venv)], timeout=180)
+        site_output = self._run(
+            [str(venv / "bin/python"), "-c", "import site; print(site.getsitepackages()[0])"],
+            timeout=30,
+        )
+        site_packages = Path(site_output.splitlines()[-1].strip())
+        if not site_packages.is_dir():
+            raise UpdaterError(f"virtualenv site-packages is missing: {site_packages}")
+        relative_source = os.path.relpath(release / "src", site_packages)
+        (site_packages / "jvlei_gateway.pth").write_text(f"{relative_source}\n", encoding="utf-8")
+
+    def _prepare_updater_release(self, application_release: Path, version: str) -> Path:
+        source = application_release / "src" / "jvlei_update"
+        if not source.is_dir():
+            raise UpdaterError("application payload is missing the update agent")
+        root = Path(self.config.updater_release_root)
+        root.mkdir(parents=True, exist_ok=True)
+        final = root / version
+        if final.exists():
+            raise UpdaterError(f"updater release already exists: {version}")
+        staging = root / f".{version}.staging-{uuid.uuid4().hex}"
+        try:
+            staging.mkdir()
+            shutil.copytree(source, staging / "jvlei_update")
+            (staging / "VERSION").write_text(f"{version}\n", encoding="ascii")
+            os.replace(staging, final)
+            return final
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
     def _prepare_release(self, package: PackageInfo) -> Path:
         version = str(package.manifest["version"])
         release_root = Path(self.config.release_root)
@@ -184,14 +219,7 @@ class ApplicationInstaller:
                 if script.is_file():
                     script.chmod(script.stat().st_mode | 0o111)
             if self.prepare_runtime:
-                self._run(
-                    ["python3", "-m", "venv", "--system-site-packages", str(staging / ".venv")],
-                    timeout=180,
-                )
-                self._run(
-                    [str(staging / ".venv/bin/python"), "-m", "pip", "install", "--no-deps", "-e", str(staging)],
-                    timeout=300,
-                )
+                self._prepare_python_runtime(staging)
             (staging / "VERSION").write_text(f"{version}\n", encoding="ascii")
             os.replace(staging, final)
             return final
@@ -279,8 +307,17 @@ class ApplicationInstaller:
             raise UpdaterError(
                 f"package {package.manifest['version']} is not compatible with current version {previous_version}"
             )
+        version = str(package.manifest["version"])
+        try:
+            new_updater_release = self._prepare_updater_release(new_release, version)
+        except Exception:
+            shutil.rmtree(new_release, ignore_errors=True)
+            raise
+        updater_current = Path(self.config.updater_current_path)
+        previous_updater_release = updater_current.resolve() if updater_current.is_symlink() else None
         imported_previous = previous
         switched = False
+        updater_switched = False
         try:
             self._wait_for_active_reports()
             self._stop_services()
@@ -295,8 +332,18 @@ class ApplicationInstaller:
             if migration.is_file():
                 self._run([str(new_release / ".venv/bin/python"), str(migration)], timeout=120)
             self._start_services(package.manifest)
-            self._health_check(str(package.manifest["version"]))
+            self._health_check(version)
+            self._atomic_symlink(new_updater_release, updater_current)
+            updater_switched = True
         except Exception:
+            if updater_switched:
+                try:
+                    if previous_updater_release is None:
+                        updater_current.unlink(missing_ok=True)
+                    else:
+                        self._atomic_symlink(previous_updater_release, updater_current)
+                except Exception:
+                    LOGGER.exception("automatic updater-agent rollback failed")
             if switched:
                 try:
                     app.unlink(missing_ok=True)
@@ -308,19 +355,26 @@ class ApplicationInstaller:
                 except Exception:
                     LOGGER.exception("automatic application rollback failed")
             shutil.rmtree(new_release, ignore_errors=True)
+            shutil.rmtree(new_updater_release, ignore_errors=True)
             raise
         state = self.state_store.read()
         state.update(
-            current_version=str(package.manifest["version"]),
+            current_version=version,
             current_release=str(new_release),
             previous_version=previous_version,
             previous_release=str(imported_previous),
+            current_updater_release=str(new_updater_release),
+            previous_updater_release=str(previous_updater_release or ""),
             installed_at=int(time.time()),
         )
         self.state_store.write(state)
         self._prune_releases({new_release.resolve(), imported_previous.resolve()})
+        updater_keep = {new_updater_release.resolve()}
+        if previous_updater_release is not None:
+            updater_keep.add(previous_updater_release.resolve())
+        self._prune_directory(Path(self.config.updater_release_root), updater_keep)
         return {
-            "version": str(package.manifest["version"]),
+            "version": version,
             "previous_version": previous_version,
             "release": str(new_release),
         }
@@ -335,13 +389,21 @@ class ApplicationInstaller:
             raise UpdaterError("previous release directory is missing")
         app = Path(self.config.application_path)
         current = app.resolve()
+        updater_current = Path(self.config.updater_current_path)
+        current_updater = updater_current.resolve() if updater_current.is_symlink() else None
+        previous_updater_value = str(state.get("previous_updater_release", ""))
+        previous_updater = Path(previous_updater_value) if previous_updater_value else None
         self._stop_services()
         try:
             self._atomic_symlink(previous, app)
             self._start_services({"requires_cups_restart": False, "requires_gadget_restart": False})
             self._health_check(self.current_version(previous))
+            if previous_updater is not None and previous_updater.is_dir():
+                self._atomic_symlink(previous_updater, updater_current)
         except Exception:
             self._atomic_symlink(current, app)
+            if current_updater is not None:
+                self._atomic_symlink(current_updater, updater_current)
             self._start_services({"requires_cups_restart": False, "requires_gadget_restart": False})
             raise
         old_current_version = str(state.get("current_version", self.current_version(current)))
@@ -350,6 +412,8 @@ class ApplicationInstaller:
             current_release=str(previous),
             previous_version=old_current_version,
             previous_release=str(current),
+            current_updater_release=str(previous_updater or current_updater or ""),
+            previous_updater_release=str(current_updater or ""),
             rolled_back_at=int(time.time()),
         )
         self.state_store.write(state)
@@ -368,7 +432,10 @@ class ApplicationInstaller:
         return "unknown"
 
     def _prune_releases(self, keep: set[Path]) -> None:
-        root = Path(self.config.release_root)
+        self._prune_directory(Path(self.config.release_root), keep)
+
+    @staticmethod
+    def _prune_directory(root: Path, keep: set[Path]) -> None:
         for candidate in root.iterdir():
             if candidate.is_dir() and candidate.resolve() not in keep and not candidate.name.startswith("."):
                 shutil.rmtree(candidate, ignore_errors=True)

@@ -12,6 +12,8 @@ keep_previous_versions: 1
 state_dir: "/var/lib/jvlei-updater"
 application_path: "/opt/gadget-msc-printer"
 release_root: "/opt/jvlei/releases/gateway"
+updater_release_root: "/usr/local/libexec/jvlei-updater/releases"
+updater_current_path: "/usr/local/libexec/jvlei-updater/current"
 data_dir: "/var/lib/gadget-msc-printer"
 active_task_wait_seconds: 90
 driver_root: "/var/lib/gadget-msc-printer/drivers"

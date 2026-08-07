@@ -229,6 +229,65 @@ class ApplicationReleasePreparationTests(unittest.TestCase):
             self.assertEqual(chmod.call_args.args[0].name, "apply_gadget_mode.sh")
             self.assertEqual(chmod.call_args.args[1] & 0o111, 0o111)
 
+    def test_release_runtime_uses_system_packages_without_pip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package_path = root / "gateway.jvpkg"
+            build_installable_application_package(package_path)
+            work_root = root / "work"
+            work_root.mkdir()
+            package = verify_package(package_path, public_key=None, allow_unsigned=True, work_root=work_root)
+            commands: list[list[str]] = []
+
+            def runner(command: list[str], timeout: int) -> CompletedProcess[str]:
+                commands.append(command)
+                if command[:3] == ["python3", "-m", "venv"]:
+                    site_packages = Path(command[-1]) / "lib" / "python3.11" / "site-packages"
+                    site_packages.mkdir(parents=True)
+                    return CompletedProcess(command, 0, "", "")
+                if command[1:3] == ["-c", "import site; print(site.getsitepackages()[0])"]:
+                    site_packages = Path(command[0]).parents[1] / "lib" / "python3.11" / "site-packages"
+                    return CompletedProcess(command, 0, f"{site_packages}\n", "")
+                return CompletedProcess(command, 1, "", "unexpected command")
+
+            config = UpdaterConfig(
+                state_dir=str(root / "state"),
+                application_path=str(root / "application"),
+                release_root=str(root / "releases"),
+            )
+            installer = ApplicationInstaller(
+                config,
+                StateStore(root / "state" / "state.json"),
+                command_runner=runner,
+            )
+            try:
+                release = installer._prepare_release(package)  # noqa: SLF001 - verifies offline runtime contract.
+            finally:
+                package.cleanup()
+            site_packages = release / ".venv" / "lib" / "python3.11" / "site-packages"
+            source_entry = (site_packages / "jvlei_gateway.pth").read_text(encoding="utf-8").strip()
+            self.assertEqual((site_packages / source_entry).resolve(), (release / "src").resolve())
+            self.assertFalse(any("pip" in command for command in commands))
+
+    def test_updater_agent_release_is_prepared_from_application(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            application = root / "application"
+            source = application / "src" / "jvlei_update"
+            source.mkdir(parents=True)
+            (source / "updater.py").write_text("VERSION = 'test'\n", encoding="utf-8")
+            config = UpdaterConfig(
+                state_dir=str(root / "state"),
+                application_path=str(application),
+                release_root=str(root / "releases"),
+                updater_release_root=str(root / "updater-releases"),
+                updater_current_path=str(root / "updater-current"),
+            )
+            installer = ApplicationInstaller(config, StateStore(root / "state" / "state.json"))
+            release = installer._prepare_updater_release(application, "0.21.1")  # noqa: SLF001
+            self.assertEqual((release / "VERSION").read_text(encoding="ascii"), "0.21.1\n")
+            self.assertTrue((release / "jvlei_update" / "updater.py").is_file())
+
 
 @unittest.skipUnless(SUPPORTS_DIRECTORY_SYMLINKS, "directory symlink support is required for Linux release switching")
 class ApplicationInstallerTests(unittest.TestCase):

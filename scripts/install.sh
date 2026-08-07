@@ -174,7 +174,8 @@ except Exception:
 PY
 
 python3 -m venv --system-site-packages "$DEST/.venv"
-"$DEST/.venv/bin/python" -m pip install --no-deps -e "$DEST"
+VENV_SITE_PACKAGES="$("$DEST/.venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+printf '%s\n' "$DEST/src" >"$VENV_SITE_PACKAGES/jvlei_gateway.pth"
 "$DEST/scripts/generate_tls_cert.sh" "$CONFIG_DIR/tls.crt" "$CONFIG_DIR/tls.key"
 
 install -m 0644 "$DEST/systemd/gadget-mode.service" /etc/systemd/system/gadget-mode.service
