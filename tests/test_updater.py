@@ -178,6 +178,7 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_download_is_verified_and_not_downloaded_twice(self) -> None:
         first = await self.service.check_once()
         self.assertTrue(first["download"]["ready"])
+        self.assertEqual(first["download"]["assignment_id"], "assignment-1")
         self.assertEqual(self.downloads, 1)
         self.assertEqual(self.reports[-1]["status"], "downloaded")
 
@@ -202,6 +203,18 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.check_once()
         with self.assertRaisesRegex(UpdaterError, "must be signed"):
             await self.service.install_downloaded()
+        self.assertEqual(self.reports[-1]["status"], "failed")
+
+    async def test_local_confirm_install_reports_original_assignment(self) -> None:
+        await self.service.check_once()
+        with patch.object(
+            self.service.installer,
+            "install",
+            return_value={"version": "0.21.0", "previous_version": "0.20.0"},
+        ):
+            status = await self.service.install_downloaded()
+        self.assertIsNone(status["download"])
+        self.assertEqual(self.reports[-1]["status"], "installed")
 
 
 class ApplicationReleasePreparationTests(unittest.TestCase):

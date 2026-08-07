@@ -639,6 +639,10 @@ class UpdaterService:
                 and previous_download.get("package_id") == package_id
                 and destination.is_file()
             ):
+                assignment_id = str(selected.get("id", ""))
+                previous_download["assignment_id"] = assignment_id
+                state["download"] = previous_download
+                self.state_store.write(state)
                 previous_manifest = previous_download.get("manifest")
                 if not isinstance(previous_manifest, dict):
                     previous_manifest = {}
@@ -649,6 +653,7 @@ class UpdaterService:
                         "version": previous_manifest.get("version", ""),
                         "signed": bool(previous_download.get("signed")),
                     },
+                    assignment_id=assignment_id,
                 )
                 return self.status()
             offset = partial.stat().st_size if partial.exists() else 0
@@ -684,6 +689,7 @@ class UpdaterService:
             info.cleanup()
             state = self.state_store.read()
             state["download"] = {
+                "assignment_id": str(selected.get("id", "")),
                 "package_id": package_id,
                 "path": str(destination),
                 "manifest": manifest,
@@ -699,6 +705,7 @@ class UpdaterService:
                     "version": manifest.get("version", ""),
                     "signed": signed,
                 },
+                assignment_id=str(selected.get("id", "")),
             )
             return self.status()
 
@@ -708,27 +715,39 @@ class UpdaterService:
             download = state.get("download")
             if not isinstance(download, dict) or not download.get("ready"):
                 raise UpdaterError("no verified update is ready to install")
+            assignment_id = str(download.get("assignment_id", ""))
             package_path = Path(str(download.get("path", "")))
-            info = verify_package(
-                package_path,
-                self.config.public_key_file if Path(self.config.public_key_file).is_file() else None,
-                allow_unsigned=self.config.allow_unsigned_packages,
-                work_root=self.config.state_dir,
-            )
             try:
-                package_type = str(info.manifest["package_type"])
-                if package_type == "application":
-                    result = await asyncio.to_thread(self.installer.install, info)
-                elif package_type == "printer_driver":
-                    result = await asyncio.to_thread(self.driver_installer.install, info)
-                else:
-                    raise UpdaterError("downloaded package type is not installable")
-            finally:
-                info.cleanup()
+                info = verify_package(
+                    package_path,
+                    self.config.public_key_file if Path(self.config.public_key_file).is_file() else None,
+                    allow_unsigned=self.config.allow_unsigned_packages,
+                    work_root=self.config.state_dir,
+                )
+                try:
+                    package_type = str(info.manifest["package_type"])
+                    if package_type == "application":
+                        result = await asyncio.to_thread(self.installer.install, info)
+                    elif package_type == "printer_driver":
+                        result = await asyncio.to_thread(self.driver_installer.install, info)
+                    else:
+                        raise UpdaterError("downloaded package type is not installable")
+                finally:
+                    info.cleanup()
+            except Exception as exc:
+                state = self.state_store.read()
+                state["last_error"] = str(exc)
+                self.state_store.write(state)
+                await self._report_assignment(
+                    "failed",
+                    {"error": str(exc)[:2000], "package_id": str(download.get("package_id", ""))},
+                    assignment_id=assignment_id,
+                )
+                raise
+            await self._report_assignment("installed", result, assignment_id=assignment_id)
             state = self.state_store.read()
             state.update(last_error="", download=None, assignment=None)
             self.state_store.write(state)
-            await self._report_assignment("installed", result)
             return self.status()
 
     async def rollback(self) -> dict[str, Any]:
@@ -737,15 +756,27 @@ class UpdaterService:
             await self._report_assignment("rolled_back", result)
             return self.status()
 
-    async def _report_assignment(self, status: str, detail: dict[str, Any]) -> None:
+    async def _report_assignment(
+        self,
+        status: str,
+        detail: dict[str, Any],
+        assignment_id: str = "",
+    ) -> None:
         state = self.state_store.read()
-        assignment = state.get("assignment")
-        if not isinstance(assignment, dict) or not assignment.get("id") or not self._token():
+        if not assignment_id:
+            assignment = state.get("assignment")
+            if isinstance(assignment, dict):
+                assignment_id = str(assignment.get("id", ""))
+        if not assignment_id:
+            download = state.get("download")
+            if isinstance(download, dict):
+                assignment_id = str(download.get("assignment_id", ""))
+        if not assignment_id or not self._token():
             return
         try:
             async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {self._token()}"}) as session:
                 async with session.post(
-                    f"{self.config.center_url.rstrip('/')}/v1/jobs/{assignment['id']}/status",
+                    f"{self.config.center_url.rstrip('/')}/v1/jobs/{assignment_id}/status",
                     json={"status": status, "detail": detail},
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as response:
