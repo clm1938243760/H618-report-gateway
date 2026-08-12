@@ -63,8 +63,7 @@
     <section class="surface">
       <div class="surface-heading">
         <div>
-          <h2>公司升级配置</h2>
-          <p class="section-note">配置与公司升级中心接口完全对应。保存后立即同步终端信息，应用编码用于匹配对应应用的版本和策略。</p>
+          <h2>升级配置</h2>
         </div>
         <el-button type="primary" plain :loading="savingConfig" :disabled="!status.available" @click="saveConfig">
           保存并同步

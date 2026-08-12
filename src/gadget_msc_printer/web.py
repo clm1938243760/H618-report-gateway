@@ -156,7 +156,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.1"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.2"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
