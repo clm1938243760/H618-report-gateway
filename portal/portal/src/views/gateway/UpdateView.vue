@@ -15,8 +15,8 @@
 
     <el-alert
       v-if="!status.available"
-      :title="status.error || '升级代理未运行'"
-      description="请检查 jvlei-updater.service。报告采集和上传服务不受影响。"
+      :title="status.error || '升级代理正在启动或重载'"
+      description="页面会自动重试；如果持续离线，请检查 jvlei-updater.service。报告采集和上传服务不受影响。"
       type="warning"
       :closable="false"
       show-icon

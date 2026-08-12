@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import aiohttp
@@ -51,11 +52,22 @@ class UpdaterClient:
         return data
 
     async def status(self) -> dict[str, Any]:
-        try:
-            result = await self._request("GET", "/status", timeout_seconds=10)
-        except UpdaterClientError as exc:
-            return {"ok": True, "available": False, "error": str(exc)}
-        return {"available": True, **result}
+        last_error: UpdaterClientError | None = None
+        for delay in (0.0, 0.25, 0.5, 1.0):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                result = await self._request("GET", "/status", timeout_seconds=10)
+            except UpdaterClientError as exc:
+                last_error = exc
+                continue
+            return {"available": True, **result}
+        return {
+            "ok": True,
+            "available": False,
+            "error": "升级代理正在启动或重载，请稍后刷新",
+            "technical_error": str(last_error or "updater service is unavailable"),
+        }
 
     async def check(self) -> dict[str, Any]:
         return await self._request("POST", "/check", {})

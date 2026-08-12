@@ -1,7 +1,7 @@
 [Unit]
 Description=KICKPI K2B report gateway HTTPS configuration and upload service
-After=NetworkManager.service network.target local-fs.target
-Wants=NetworkManager.service network.target
+After=NetworkManager.service network.target network-online.target local-fs.target jvlei-updater.service
+Wants=NetworkManager.service network-online.target jvlei-updater.service
 
 [Service]
 Type=simple
