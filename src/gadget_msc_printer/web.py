@@ -697,13 +697,15 @@ class ConfigWebApp:
 
     async def update_config(self, request: web.Request) -> web.Response:
         payload = await request.json()
-        center_url = str(payload.get("center_url", "")).strip()
+        settings = payload.get("settings")
+        if not isinstance(settings, dict):
+            return web.json_response({"ok": False, "error": "settings must be an object"}, status=400)
         organization = payload.get("organization")
         if not isinstance(organization, dict):
             return web.json_response({"ok": False, "error": "organization must be an object"}, status=400)
         try:
             result = await self.updater.configure(
-                center_url,
+                settings,
                 {key: str(value).strip() for key, value in organization.items()},
             )
             config = load_config(self.config_path)

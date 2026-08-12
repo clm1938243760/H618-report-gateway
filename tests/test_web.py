@@ -213,9 +213,13 @@ class FakeUpdaterClient:
         return {
             "ok": True,
             "available": True,
+            "enabled": True,
+            "boot_check": True,
             "center_url": self.center_url,
             "app_code": "linux",
             "platform": "linux-arm64",
+            "terminal_name": "K2B-TEST",
+            "os_version": "Linux 6.1.0 aarch64",
             "allow_unsigned_packages": True,
             "current_version": "v0.21.3",
             "current_version_id": "21",
@@ -272,10 +276,13 @@ class FakeUpdaterClient:
         value["current_version"] = "v0.21.2"
         return value
 
-    async def configure(self, center_url: str, organization: dict[str, str]):
-        self.calls.append(f"config:{center_url}:{organization.get('hospital_code', '')}")
-        self.center_url = center_url
+    async def configure(self, settings: dict[str, object], organization: dict[str, str]):
+        self.calls.append(
+            f"config:{settings.get('center_url')}:{settings.get('app_code')}:{organization.get('hospital_code', '')}"
+        )
+        self.center_url = str(settings["center_url"])
         value = self._status()
+        value.update(settings)
         value["organization"] = dict(organization)
         value["last_terminal_report_at"] = 1786521474
         return value
@@ -385,7 +392,13 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             "/api/update/config",
             headers=headers,
             json={
-                "center_url": "http://192.168.112.230:28080",
+                "settings": {
+                    "enabled": True,
+                    "boot_check": False,
+                    "center_url": "http://192.168.112.230:28080",
+                    "app_code": "linux-box",
+                    "platform": "linux-arm64",
+                },
                 "organization": {
                     "hospital_code": "tejian01",
                     "hospital_id": "H-021",
@@ -397,9 +410,12 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(response.status, 200)
-        self.assertEqual((await response.json())["center_url"], "http://192.168.112.230:28080")
+        saved_update = await response.json()
+        self.assertEqual(saved_update["center_url"], "http://192.168.112.230:28080")
+        self.assertEqual(saved_update["app_code"], "linux-box")
+        self.assertFalse(saved_update["boot_check"])
         self.assertIn("download", self.updater.calls)
-        self.assertIn("config:http://192.168.112.230:28080:tejian01", self.updater.calls)
+        self.assertIn("config:http://192.168.112.230:28080:linux-box:tejian01", self.updater.calls)
 
     async def test_driver_upload_is_analyzed_before_installation(self) -> None:
         token, csrf = await self._login()

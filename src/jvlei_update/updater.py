@@ -73,6 +73,9 @@ class UpdaterConfig:
         return config
 
     def validate(self) -> None:
+        for field_name in ("enabled", "boot_check", "allow_unsigned_packages"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise UpdaterError(f"{field_name} must be a boolean")
         if not self.center_url.startswith(("http://", "https://")):
             raise UpdaterError("center_url must be an HTTP or HTTPS URL")
         parsed = urlparse(self.center_url)
@@ -87,7 +90,7 @@ class UpdaterConfig:
             raise UpdaterError("center_url must be an HTTP(S) origin without credentials, query, or fragment")
         for field_name in ("app_code", "platform", "product"):
             value = str(getattr(self, field_name)).strip()
-            if not value or len(value) > 128:
+            if not value or len(value) > 128 or any(char in value for char in "\r\n"):
                 raise UpdaterError(f"{field_name} is invalid")
         if int(self.keep_previous_versions) != 1:
             raise UpdaterError("keep_previous_versions must be 1 in this release")
@@ -741,9 +744,12 @@ class UpdaterService:
         return {
             "ok": True,
             "enabled": self.config.enabled,
+            "boot_check": self.config.boot_check,
             "center_url": self.config.center_url,
             "app_code": self.config.app_code,
             "platform": self.config.platform,
+            "terminal_name": socket.gethostname(),
+            "os_version": f"{platform.system()} {platform.release()} {platform.machine()}",
             "allow_unsigned_packages": self.config.allow_unsigned_packages,
             "current_version": server_version(self._current_version()),
             # Company IDs are int64 and exceed JavaScript's safe integer range.
@@ -770,17 +776,6 @@ class UpdaterService:
         temporary.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
         os.chmod(temporary, 0o640)
         os.replace(temporary, self.config_path)
-
-    def set_center_url(self, center_url: str) -> dict[str, Any]:
-        previous = self.config.center_url
-        self.config.center_url = center_url.strip().rstrip("/")
-        try:
-            self.config.validate()
-            self._save_config()
-        except Exception:
-            self.config.center_url = previous
-            raise
-        return self.status()
 
     def _save_business_identity(self, values: dict[str, Any]) -> None:
         source = Path(self.config.business_config_file)
@@ -822,19 +817,42 @@ class UpdaterService:
         self.state_store.write(state)
         return self.status()
 
-    async def configure_company(self, center_url: str, organization: dict[str, Any]) -> dict[str, Any]:
-        previous_url = self.config.center_url
+    async def configure_company(
+        self,
+        settings: dict[str, Any],
+        organization: dict[str, Any],
+    ) -> dict[str, Any]:
+        previous_config = UpdaterConfig(**asdict(self.config))
         business_path = Path(self.config.business_config_file)
         previous_business = business_path.read_bytes()
         try:
-            self.set_center_url(center_url)
+            for field in ("enabled", "boot_check"):
+                if not isinstance(settings.get(field), bool):
+                    raise UpdaterError(f"{field} must be a boolean")
+            self.config.enabled = settings["enabled"]
+            self.config.boot_check = settings["boot_check"]
+            self.config.center_url = str(settings.get("center_url", "")).strip().rstrip("/")
+            self.config.app_code = str(settings.get("app_code", "")).strip()
+            self.config.platform = str(settings.get("platform", "")).strip()
+            self.config.validate()
+            self._save_config()
             self._save_business_identity(organization)
+            identity_changed = any(
+                getattr(previous_config, field) != getattr(self.config, field)
+                for field in ("center_url", "app_code", "platform")
+            )
+            if identity_changed or not self.config.enabled:
+                state = self.state_store.read()
+                state.update(update=None, download=None, last_error="")
+                self.state_store.write(state)
         except Exception:
-            self.config.center_url = previous_url
+            self.config = previous_config
             self._save_config()
             business_path.write_bytes(previous_business)
             os.chmod(business_path, 0o640)
             raise
+        if not self.config.enabled:
+            return self.status()
         try:
             return await self.report_terminal_info()
         except Exception:
@@ -960,6 +978,8 @@ class UpdaterService:
         }
 
     async def check_once(self, *, auto_execute: bool = True) -> dict[str, Any]:
+        if not self.config.enabled:
+            raise UpdaterError("online updates are disabled")
         await self._flush_reports()
         state = self.state_store.read()
         state["last_check_at"] = int(time.time())
@@ -1006,6 +1026,8 @@ class UpdaterService:
             raise UpdaterError(f"package download failed: {exc}") from exc
 
     async def download_update(self) -> dict[str, Any]:
+        if not self.config.enabled:
+            raise UpdaterError("online updates are disabled")
         async with self.operation_lock:
             state = self.state_store.read()
             update = state.get("update")
@@ -1091,6 +1113,8 @@ class UpdaterService:
             return self.status()
 
     async def install_downloaded(self) -> dict[str, Any]:
+        if not self.config.enabled:
+            raise UpdaterError("online updates are disabled")
         async with self.operation_lock:
             state = self.state_store.read()
             download = state.get("download")
@@ -1183,6 +1207,8 @@ class UpdaterService:
         return self.status()
 
     def start_install(self) -> dict[str, Any]:
+        if not self.config.enabled:
+            raise UpdaterError("online updates are disabled")
         state = self.state_store.read()
         download = state.get("download")
         if not isinstance(download, dict) or not download.get("ready"):
@@ -1190,6 +1216,8 @@ class UpdaterService:
         return self._start_background("install", self.install_downloaded)
 
     def start_auto_update(self) -> dict[str, Any]:
+        if not self.config.enabled:
+            raise UpdaterError("online updates are disabled")
         state = self.state_store.read()
         update = state.get("update")
         if not isinstance(update, dict) or update.get("auto_upgrade") is not True:

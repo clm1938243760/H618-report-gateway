@@ -231,7 +231,13 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_company_configuration_is_saved_and_terminal_is_synchronized(self) -> None:
         status = await self.service.configure_company(
-            str(self.server.make_url("" )).rstrip("/"),
+            {
+                "enabled": True,
+                "boot_check": False,
+                "center_url": str(self.server.make_url("")).rstrip("/"),
+                "app_code": "linux-test",
+                "platform": "linux-arm64",
+            },
             {
                 "hospital_code": "new-hospital",
                 "hospital_id": "H-NEW",
@@ -242,11 +248,49 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(status["organization"]["hospital_code"], "new-hospital")
+        self.assertEqual(status["app_code"], "linux-test")
+        self.assertFalse(status["boot_check"])
         self.assertTrue(status["last_terminal_report_at"])
         saved = yaml.safe_load(Path(self.service.config.business_config_file).read_text(encoding="utf-8"))
         self.assertEqual(saved["upload"]["hospital_code"], "new-hospital")
         self.assertEqual(saved["company_update"]["hospital_area_id"], "CAMPUS-NEW")
         self.assertEqual(self.terminal_requests[-1]["hospitalCode"], "new-hospital")
+        self.assertEqual(self.terminal_requests[-1]["appCode"], "linux-test")
+        saved_updater = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_updater["app_code"], "linux-test")
+        self.assertFalse(saved_updater["boot_check"])
+
+    async def test_disabled_company_configuration_saves_without_reporting(self) -> None:
+        state = self.service.state_store.read()
+        state.update(update={"version": "v0.22.0"}, download={"ready": True})
+        self.service.state_store.write(state)
+        status = await self.service.configure_company(
+            {
+                "enabled": False,
+                "boot_check": True,
+                "center_url": str(self.server.make_url("")).rstrip("/"),
+                "app_code": "linux",
+                "platform": "linux-arm64",
+            },
+            {
+                "hospital_code": "tejian01",
+                "hospital_id": "",
+                "hospital_area_code": "",
+                "hospital_area_id": "",
+                "dept_code": "",
+                "dept_id": "",
+            },
+        )
+        self.assertFalse(status["enabled"])
+        self.assertIsNone(status["update"])
+        self.assertIsNone(status["download"])
+        self.assertEqual(self.terminal_requests, [])
+        with self.assertRaisesRegex(UpdaterError, "disabled"):
+            await self.service.check_once()
+        with self.assertRaisesRegex(UpdaterError, "disabled"):
+            await self.service.download_update()
+        with self.assertRaisesRegex(UpdaterError, "disabled"):
+            self.service.start_install()
 
     async def test_manual_download_verifies_company_zip_and_reports_statuses(self) -> None:
         await self.service.check_once()

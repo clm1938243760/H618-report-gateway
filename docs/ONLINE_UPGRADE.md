@@ -16,10 +16,11 @@ H618 报告网关从 `v0.22.0` 起直接接入公司升级平台，不再使用�
   -> POST /api/auto-update/rollback-report 上报回滚结果
 ```
 
-- 固定 `appCode=linux`、`platform=linux-arm64`。
+- `appCode` 默认 `linux`，可在 HTTPS 管理页按公司应用编码修改；`platform` 当前受控为
+  `linux-arm64`，并用于版本策略和安装包双重匹配。
 - 当前 IP 和 MAC 根据到公司服务器的实际路由动态获取。
-- HTTPS 管理页的“软件升级”可统一维护医院、院区、科室信息；保存后立即调用
-  `report-terminal-info` 同步终端。
+- HTTPS 管理页的“软件升级”可统一维护升级中心地址、启用状态、开机检查、`appCode`、
+  医院、院区和科室信息；保存后立即调用 `report-terminal-info` 同步终端。
 - `hospitalCode` 与报告上传共用 `upload.hospital_code`；其他机构字段保存在
   `company_update`。未配置的可选字段不发送。
 - 开机只检查一次，失败不周期重试。恢复网络后可在 HTTPS 管理页手动检查。

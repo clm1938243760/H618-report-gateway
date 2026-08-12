@@ -7,7 +7,7 @@
       </div>
       <div class="page-actions">
         <el-button :icon="Refresh" :loading="loading" @click="loadStatus">刷新状态</el-button>
-        <el-button type="primary" :icon="Search" :loading="checking" :disabled="!status.available" @click="checkUpdate">
+        <el-button type="primary" :icon="Search" :loading="checking" :disabled="!status.available || !status.enabled" @click="checkUpdate">
           检查更新
         </el-button>
       </div>
@@ -64,13 +64,28 @@
       <div class="surface-heading">
         <div>
           <h2>公司升级配置</h2>
-          <p class="section-note">保存后立即同步终端信息。医院编码同时用于报告上传和升级策略匹配。</p>
+          <p class="section-note">配置与公司升级中心接口完全对应。保存后立即同步终端信息，应用编码用于匹配对应应用的版本和策略。</p>
         </div>
         <el-button type="primary" plain :loading="savingConfig" :disabled="!status.available" @click="saveConfig">
           保存并同步
         </el-button>
       </div>
       <el-form label-position="top" class="company-config-form">
+        <el-form-item label="启用在线升级">
+          <el-switch v-model="companyForm.enabled" inline-prompt active-text="开启" inactive-text="关闭" />
+        </el-form-item>
+        <el-form-item label="开机检查更新">
+          <el-switch v-model="companyForm.boot_check" inline-prompt active-text="开启" inactive-text="关闭" />
+        </el-form-item>
+        <el-form-item label="应用编码（appCode）">
+          <el-input v-model.trim="companyForm.app_code" maxlength="128" placeholder="例如：linux" />
+          <div class="field-tip">必须与升级中心的应用编码和升级包清单一致。</div>
+        </el-form-item>
+        <el-form-item label="运行平台">
+          <el-select v-model="companyForm.platform" class="full-width">
+            <el-option label="Linux ARM64" value="linux-arm64" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="公司服务地址" class="full-row">
           <el-input v-model.trim="companyForm.center_url" maxlength="512" placeholder="例如：http://192.168.112.229:28080" />
         </el-form-item>
@@ -99,6 +114,12 @@
         </el-tag>
         <span v-if="status.last_terminal_report_error" class="error-text">{{ status.last_terminal_report_error }}</span>
       </div>
+      <el-descriptions :column="descriptionColumns" border class="terminal-descriptions">
+        <el-descriptions-item label="终端名称">{{ status.terminal_name || "-" }}</el-descriptions-item>
+        <el-descriptions-item label="操作系统">{{ status.os_version || "-" }}</el-descriptions-item>
+        <el-descriptions-item label="终端IP">{{ status.network?.ip || "-" }}</el-descriptions-item>
+        <el-descriptions-item label="终端MAC">{{ status.network?.mac || "-" }}</el-descriptions-item>
+      </el-descriptions>
     </section>
 
     <section class="surface">
@@ -144,7 +165,11 @@ const installing = ref(false);
 const rollingBack = ref(false);
 const mobileLayout = ref(window.innerWidth <= 640);
 const companyForm = reactive({
+  enabled: true,
+  boot_check: true,
   center_url: "",
+  app_code: "linux",
+  platform: "linux-arm64",
   hospital_code: "",
   hospital_id: "",
   hospital_area_code: "",
@@ -157,8 +182,8 @@ const status = ref({ available: false, update: null, download: null, network: {}
 
 const update = computed(() => status.value.update || null);
 const downloaded = computed(() => status.value.download || null);
-const canDownload = computed(() => Boolean(status.value.available && update.value && !downloaded.value?.ready && !status.value.installing));
-const canInstall = computed(() => Boolean(status.value.available && downloaded.value?.ready && !status.value.installing));
+const canDownload = computed(() => Boolean(status.value.available && status.value.enabled && update.value && !downloaded.value?.ready && !status.value.installing));
+const canInstall = computed(() => Boolean(status.value.available && status.value.enabled && downloaded.value?.ready && !status.value.installing));
 const canRollback = computed(() => Boolean(status.value.available && status.value.previous_version && !status.value.installing));
 const targetVersion = computed(() => update.value?.version || downloaded.value?.manifest?.server_version || "暂无可用更新");
 const strategyStatus = computed(() => {
@@ -174,6 +199,7 @@ const operationStatus = computed(() => {
 });
 const descriptionColumns = computed(() => mobileLayout.value ? 1 : 2);
 const terminalSyncStatus = computed(() => {
+  if (!status.value.enabled) return "在线升级已关闭";
   if (status.value.last_terminal_report_error) return "终端信息同步失败";
   if (status.value.last_terminal_report_at) return `已同步 · ${formatTime(status.value.last_terminal_report_at)}`;
   return "尚未同步";
@@ -201,7 +227,14 @@ async function loadStatus(silent = false) {
     const { data } = await api.get("/api/update/status");
     status.value = data;
     if (!silent || !formLoaded.value) {
-      Object.assign(companyForm, { center_url: data.center_url || "", ...(data.organization || {}) });
+      Object.assign(companyForm, {
+        enabled: data.enabled !== false,
+        boot_check: data.boot_check !== false,
+        center_url: data.center_url || "",
+        app_code: data.app_code || "linux",
+        platform: data.platform || "linux-arm64",
+        ...(data.organization || {})
+      });
       formLoaded.value = true;
     }
   } catch (error) {
@@ -218,10 +251,26 @@ async function saveConfig() {
       ElMessage.warning("请填写医院编码");
       return;
     }
-    const { center_url, ...organization } = companyForm;
-    const { data } = await api.put("/api/update/config", { center_url, organization });
+    if (!companyForm.app_code) {
+      ElMessage.warning("请填写应用编码（appCode）");
+      return;
+    }
+    const { enabled, boot_check, center_url, app_code, platform, ...organization } = companyForm;
+    const settings = { enabled, boot_check, center_url, app_code, platform };
+    const { data } = await api.put("/api/update/config", { settings, organization });
     status.value = { ...status.value, ...data, available: true };
-    Object.assign(companyForm, { center_url: data.center_url || center_url, ...(data.organization || {}) });
+    Object.assign(companyForm, {
+      enabled: data.enabled,
+      boot_check: data.boot_check,
+      center_url: data.center_url || center_url,
+      app_code: data.app_code || app_code,
+      platform: data.platform || platform,
+      ...(data.organization || {})
+    });
+    if (!data.enabled) {
+      ElMessage.success("升级配置已保存，在线升级已关闭");
+      return;
+    }
     if (data.last_terminal_report_error) {
       ElMessage.warning("升级配置已保存，但终端信息同步失败，可稍后再次保存或检查更新");
     } else {
@@ -339,6 +388,9 @@ onBeforeUnmount(() => {
   .full-row { grid-column: 1 / -1; }
 }
 .sync-result { display: flex; align-items: center; gap: 12px; min-height: 28px; }
+.terminal-descriptions { margin-top: 14px; }
+.full-width { width: 100%; }
+.field-tip { margin-top: 5px; color: #7b8998; font-size: 12px; line-height: 1.4; }
 @media (max-width: 980px) {
   .update-summary, .update-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .company-config-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
