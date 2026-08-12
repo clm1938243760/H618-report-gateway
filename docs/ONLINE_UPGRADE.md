@@ -18,8 +18,10 @@ H618 报告网关从 `v0.22.0` 起直接接入公司升级平台，不再使用�
 
 - 固定 `appCode=linux`、`platform=linux-arm64`。
 - 当前 IP 和 MAC 根据到公司服务器的实际路由动态获取。
-- `hospitalCode` 读取 `/etc/gadget-msc-printer/config.yaml` 中的
-  `upload.hospital_code`；其他未配置的可选字段不发送。
+- HTTPS 管理页的“软件升级”可统一维护医院、院区、科室信息；保存后立即调用
+  `report-terminal-info` 同步终端。
+- `hospitalCode` 与报告上传共用 `upload.hospital_code`；其他机构字段保存在
+  `company_update`。未配置的可选字段不发送。
 - 开机只检查一次，失败不周期重试。恢复网络后可在 HTTPS 管理页手动检查。
 - `autoUpgrade=true` 时自动下载和安装；`false` 时只展示更新，等待网页操作。
 - 第一版仅使用 `/check` 返回的临时链接。链接下载失败时重新调用 `/check` 刷新一次，
@@ -95,9 +97,9 @@ py -3.14 scripts\build_company_update_zip.py `
 安装包：h618-report-gateway-v0.22.0-linux-arm64.zip
 ```
 
-升级策略中可按医院、院区、科室、IP 或 MAC 选择终端。板端当前只上报已配置的
-`hospitalCode`，以及实际联网 IP/MAC；若策略使用医院维度，需保证业务配置中的医院编码
-与平台一致。
+升级策略中可按医院、院区、科室、IP 或 MAC 选择终端。板端会上报网页中已配置的
+医院、院区和科室标识，以及实际联网 IP/MAC。两个公司接口的院区字段命名不同：终端信息
+上报使用 `campusCode/campusId`，检查更新使用 `hospitalAreaCode`，代理会自动转换。
 
 ## 安装和回滚
 

@@ -69,5 +69,12 @@ class UpdaterClient:
     async def rollback(self) -> dict[str, Any]:
         return await self._request("POST", "/rollback", {})
 
-    async def configure(self, center_url: str) -> dict[str, Any]:
-        return await self._request("PUT", "/config", {"center_url": center_url})
+    async def configure(self, center_url: str, organization: dict[str, str]) -> dict[str, Any]:
+        return await self._request(
+            "PUT",
+            "/config",
+            {"center_url": center_url, "organization": organization},
+        )
+
+    async def sync_terminal(self) -> dict[str, Any]:
+        return await self._request("POST", "/sync-terminal", {})

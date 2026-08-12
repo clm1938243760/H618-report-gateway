@@ -41,6 +41,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(loaded.hotspot.autostart)
         self.assertEqual(loaded.hotspot.idle_timeout_minutes, 30)
         self.assertEqual(loaded.upload.hospital_code, "tejian01")
+        self.assertEqual(loaded.company_update.hospital_id, "")
         self.assertTrue(loaded.upload.deduplicate)
         self.assertTrue(loaded.msc.deduplicate)
         self.assertFalse(loaded.msc.auto_delete)

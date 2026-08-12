@@ -99,7 +99,17 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
         application.mkdir()
         (application / "VERSION").write_text("0.21.2\n", encoding="ascii")
         business_config = self.root / "gateway.yaml"
-        business_config.write_text("upload:\n  hospital_code: tejian01\n", encoding="utf-8")
+        business_config.write_text(
+            "upload:\n"
+            "  hospital_code: tejian01\n"
+            "company_update:\n"
+            "  hospital_id: H-021\n"
+            "  hospital_area_code: AREA-01\n"
+            "  hospital_area_id: CAMPUS-01\n"
+            "  dept_code: DEPT-01\n"
+            "  dept_id: D-01\n",
+            encoding="utf-8",
+        )
         self.config_path = self.root / "updater.yaml"
         config_data = {
             "center_url": str(self.server.make_url("/")).rstrip("/"),
@@ -211,9 +221,32 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["terminalMac"], "02:00:89:BD:16:D6")
         self.assertEqual(request["currentVersion"], "v0.21.2")
         self.assertNotIn("currentVersionId", request)
-        self.assertNotIn("hospitalId", request)
-        self.assertNotIn("hospitalAreaCode", request)
-        self.assertNotIn("deptCode", request)
+        self.assertEqual(request["hospitalId"], "H-021")
+        self.assertEqual(request["hospitalAreaCode"], "AREA-01")
+        self.assertEqual(request["deptCode"], "DEPT-01")
+        terminal = self.terminal_requests[-1]
+        self.assertEqual(terminal["campusCode"], "AREA-01")
+        self.assertEqual(terminal["campusId"], "CAMPUS-01")
+        self.assertEqual(terminal["deptId"], "D-01")
+
+    async def test_company_configuration_is_saved_and_terminal_is_synchronized(self) -> None:
+        status = await self.service.configure_company(
+            str(self.server.make_url("" )).rstrip("/"),
+            {
+                "hospital_code": "new-hospital",
+                "hospital_id": "H-NEW",
+                "hospital_area_code": "AREA-NEW",
+                "hospital_area_id": "CAMPUS-NEW",
+                "dept_code": "DEPT-NEW",
+                "dept_id": "D-NEW",
+            },
+        )
+        self.assertEqual(status["organization"]["hospital_code"], "new-hospital")
+        self.assertTrue(status["last_terminal_report_at"])
+        saved = yaml.safe_load(Path(self.service.config.business_config_file).read_text(encoding="utf-8"))
+        self.assertEqual(saved["upload"]["hospital_code"], "new-hospital")
+        self.assertEqual(saved["company_update"]["hospital_area_id"], "CAMPUS-NEW")
+        self.assertEqual(self.terminal_requests[-1]["hospitalCode"], "new-hospital")
 
     async def test_manual_download_verifies_company_zip_and_reports_statuses(self) -> None:
         await self.service.check_once()

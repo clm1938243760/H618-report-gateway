@@ -272,10 +272,13 @@ class FakeUpdaterClient:
         value["current_version"] = "v0.21.2"
         return value
 
-    async def configure(self, center_url: str):
-        self.calls.append(f"config:{center_url}")
+    async def configure(self, center_url: str, organization: dict[str, str]):
+        self.calls.append(f"config:{center_url}:{organization.get('hospital_code', '')}")
         self.center_url = center_url
-        return self._status()
+        value = self._status()
+        value["organization"] = dict(organization)
+        value["last_terminal_report_at"] = 1786521474
+        return value
 
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
@@ -381,12 +384,22 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.put(
             "/api/update/config",
             headers=headers,
-            json={"center_url": "http://192.168.112.230:28080"},
+            json={
+                "center_url": "http://192.168.112.230:28080",
+                "organization": {
+                    "hospital_code": "tejian01",
+                    "hospital_id": "H-021",
+                    "hospital_area_code": "AREA-01",
+                    "hospital_area_id": "CAMPUS-01",
+                    "dept_code": "DEPT-01",
+                    "dept_id": "D-01",
+                },
+            },
         )
         self.assertEqual(response.status, 200)
         self.assertEqual((await response.json())["center_url"], "http://192.168.112.230:28080")
         self.assertIn("download", self.updater.calls)
-        self.assertIn("config:http://192.168.112.230:28080", self.updater.calls)
+        self.assertIn("config:http://192.168.112.230:28080:tejian01", self.updater.calls)
 
     async def test_driver_upload_is_analyzed_before_installation(self) -> None:
         token, csrf = await self._login()

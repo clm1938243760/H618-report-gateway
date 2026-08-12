@@ -53,7 +53,17 @@ def create_local_app(service: UpdaterService) -> web.Application:
     async def configure(request: web.Request) -> web.Response:
         payload = await request.json()
         try:
-            result = service.set_center_url(str(payload.get("center_url", "")))
+            organization = payload.get("organization")
+            if not isinstance(organization, dict):
+                raise UpdaterError("organization must be an object")
+            result = await service.configure_company(str(payload.get("center_url", "")), organization)
+        except (UpdaterError, OSError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response(result)
+
+    async def sync_terminal(request: web.Request) -> web.Response:
+        try:
+            result = await service.report_terminal_info()
         except (UpdaterError, OSError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         return web.json_response(result)
@@ -65,6 +75,7 @@ def create_local_app(service: UpdaterService) -> web.Application:
             web.post("/download", download),
             web.post("/install", install),
             web.post("/rollback", rollback),
+            web.post("/sync-terminal", sync_terminal),
             web.put("/config", configure),
         ]
     )

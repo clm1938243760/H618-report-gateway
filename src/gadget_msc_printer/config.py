@@ -137,6 +137,15 @@ class UploadConfig:
 
 
 @dataclass
+class CompanyUpdateConfig:
+    hospital_id: str = ""
+    hospital_area_code: str = ""
+    hospital_area_id: str = ""
+    dept_code: str = ""
+    dept_id: str = ""
+
+
+@dataclass
 class CleanupConfig:
     enabled: bool = True
     interval_hours: int = 24
@@ -220,6 +229,7 @@ class AppConfig:
     hotspot: HotspotConfig = field(default_factory=HotspotConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
     upload: UploadConfig = field(default_factory=UploadConfig)
+    company_update: CompanyUpdateConfig = field(default_factory=CompanyUpdateConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     msc: MscConfig = field(default_factory=MscConfig)
     printer: PrinterConfig = field(default_factory=PrinterConfig)
@@ -268,6 +278,7 @@ def load_config(path: str | Path) -> AppConfig:
         hotspot=_merge_dataclass(HotspotConfig, data.get("hotspot", {})),
         device=_merge_dataclass(DeviceConfig, data.get("device", {})),
         upload=_merge_dataclass(UploadConfig, data.get("upload", {})),
+        company_update=_merge_dataclass(CompanyUpdateConfig, data.get("company_update", {})),
         cleanup=_merge_dataclass(CleanupConfig, data.get("cleanup", {})),
         msc=_merge_dataclass(MscConfig, data.get("msc", {})),
         printer=_merge_dataclass(PrinterConfig, data.get("printer", {})),
@@ -326,6 +337,15 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError("upload.hospital_code must not be empty")
         if len(config.upload.hospital_code.strip()) > 128:
             raise ValueError("upload.hospital_code must not exceed 128 characters")
+    for name, value in (
+        ("company_update.hospital_id", config.company_update.hospital_id),
+        ("company_update.hospital_area_code", config.company_update.hospital_area_code),
+        ("company_update.hospital_area_id", config.company_update.hospital_area_id),
+        ("company_update.dept_code", config.company_update.dept_code),
+        ("company_update.dept_id", config.company_update.dept_id),
+    ):
+        if len(value.strip()) > 128 or any(char in value for char in "\r\n"):
+            raise ValueError(f"{name} must not exceed 128 characters or contain line breaks")
     for name, value in (
         ("device.device_code", config.device.device_code),
         ("device.exam_doct", config.device.exam_doct),

@@ -534,6 +534,15 @@ class ApplicationInstaller:
 
 
 class UpdaterService:
+    ORGANIZATION_FIELDS = (
+        "hospital_code",
+        "hospital_id",
+        "hospital_area_code",
+        "hospital_area_id",
+        "dept_code",
+        "dept_id",
+    )
+
     def __init__(self, config_path: str | Path, config: UpdaterConfig) -> None:
         self.config_path = Path(config_path)
         self.config = config
@@ -629,15 +638,28 @@ class UpdaterService:
         except OSError as exc:
             raise UpdaterError(f"cannot determine network identity for update center: {exc}") from exc
 
-    def _hospital_code(self) -> str:
+    def _business_identity(self) -> dict[str, str]:
         try:
             data = yaml.safe_load(Path(self.config.business_config_file).read_text(encoding="utf-8")) or {}
-            upload = data.get("upload") if isinstance(data, dict) else None
-            return str(upload.get("hospital_code", "")).strip() if isinstance(upload, dict) else ""
+            if not isinstance(data, dict):
+                return {}
+            upload = data.get("upload")
+            company = data.get("company_update")
+            upload = upload if isinstance(upload, dict) else {}
+            company = company if isinstance(company, dict) else {}
+            values = {
+                "hospital_code": str(upload.get("hospital_code", "")).strip(),
+                "hospital_id": str(company.get("hospital_id", "")).strip(),
+                "hospital_area_code": str(company.get("hospital_area_code", "")).strip(),
+                "hospital_area_id": str(company.get("hospital_area_id", "")).strip(),
+                "dept_code": str(company.get("dept_code", "")).strip(),
+                "dept_id": str(company.get("dept_id", "")).strip(),
+            }
+            return values
         except (OSError, yaml.YAMLError):
-            return ""
+            return {}
 
-    def _terminal_payload(self) -> dict[str, Any]:
+    def _base_terminal_payload(self) -> dict[str, Any]:
         identity = self._network_identity()
         payload: dict[str, Any] = {
             "appCode": self.config.app_code,
@@ -646,18 +668,39 @@ class UpdaterService:
         }
         if identity["mac"]:
             payload["terminalMac"] = identity["mac"]
-        hospital_code = self._hospital_code()
-        if hospital_code:
-            payload["hospitalCode"] = hospital_code
+        return payload
+
+    def _terminal_payload(self) -> dict[str, Any]:
+        payload = self._base_terminal_payload()
+        organization = self._business_identity()
+        for source, target in (
+            ("hospital_code", "hospitalCode"),
+            ("hospital_id", "hospitalId"),
+            ("hospital_area_code", "campusCode"),
+            ("hospital_area_id", "campusId"),
+            ("dept_code", "deptCode"),
+            ("dept_id", "deptId"),
+        ):
+            if organization.get(source):
+                payload[target] = organization[source]
         return payload
 
     def _check_payload(self) -> dict[str, Any]:
-        payload = self._terminal_payload()
+        payload = self._base_terminal_payload()
         payload.update(
             currentVersion=server_version(self._current_version()),
             platform=self.config.platform,
             osVersion=f"{platform.system()} {platform.release()} {platform.machine()}",
         )
+        organization = self._business_identity()
+        for source, target in (
+            ("hospital_code", "hospitalCode"),
+            ("hospital_id", "hospitalId"),
+            ("hospital_area_code", "hospitalAreaCode"),
+            ("dept_code", "deptCode"),
+        ):
+            if organization.get(source):
+                payload[target] = organization[source]
         version_id = self.state_store.read().get("current_version_id")
         if version_id not in (None, "", 0, "0"):
             payload["currentVersionId"] = int(version_id)
@@ -708,8 +751,11 @@ class UpdaterService:
             "update": update,
             "download": state.get("download"),
             "network": identity,
+            "organization": self._business_identity(),
             "last_check_at": state.get("last_check_at"),
             "last_success_at": state.get("last_success_at"),
+            "last_terminal_report_at": state.get("last_terminal_report_at"),
+            "last_terminal_report_error": state.get("last_terminal_report_error", ""),
             "last_error": state.get("last_error", ""),
             "previous_version": state.get("previous_version", ""),
             "pending_reports": len(state.get("pending_reports", [])),
@@ -735,6 +781,64 @@ class UpdaterService:
             self.config.center_url = previous
             raise
         return self.status()
+
+    def _save_business_identity(self, values: dict[str, Any]) -> None:
+        source = Path(self.config.business_config_file)
+        data = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise UpdaterError("business config root must be a mapping")
+        normalized: dict[str, str] = {}
+        for field in self.ORGANIZATION_FIELDS:
+            value = str(values.get(field, "")).strip()
+            if len(value) > 128 or any(char in value for char in "\r\n"):
+                raise UpdaterError(f"organization field {field} is invalid")
+            normalized[field] = value
+        if not normalized["hospital_code"]:
+            raise UpdaterError("hospital_code must not be empty")
+        upload = data.setdefault("upload", {})
+        company = data.setdefault("company_update", {})
+        if not isinstance(upload, dict) or not isinstance(company, dict):
+            raise UpdaterError("business upload/company_update config must be a mapping")
+        upload["hospital_code"] = normalized.pop("hospital_code")
+        company.update(normalized)
+        temporary = source.with_name(f".{source.name}.{uuid.uuid4().hex}")
+        try:
+            temporary.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            os.chmod(temporary, 0o640)
+            os.replace(temporary, source)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    async def report_terminal_info(self) -> dict[str, Any]:
+        try:
+            await self._request_json("POST", "/api/auto-update/report-terminal-info", self._terminal_payload())
+        except Exception as exc:
+            state = self.state_store.read()
+            state["last_terminal_report_error"] = str(exc)
+            self.state_store.write(state)
+            raise
+        state = self.state_store.read()
+        state.update(last_terminal_report_at=int(time.time()), last_terminal_report_error="")
+        self.state_store.write(state)
+        return self.status()
+
+    async def configure_company(self, center_url: str, organization: dict[str, Any]) -> dict[str, Any]:
+        previous_url = self.config.center_url
+        business_path = Path(self.config.business_config_file)
+        previous_business = business_path.read_bytes()
+        try:
+            self.set_center_url(center_url)
+            self._save_business_identity(organization)
+        except Exception:
+            self.config.center_url = previous_url
+            self._save_config()
+            business_path.write_bytes(previous_business)
+            os.chmod(business_path, 0o640)
+            raise
+        try:
+            return await self.report_terminal_info()
+        except Exception:
+            return self.status()
 
     async def _flush_reports(self) -> None:
         state = self.state_store.read()
@@ -819,7 +923,7 @@ class UpdaterService:
 
     async def _check_company(self, *, report_terminal: bool = True) -> dict[str, Any] | None:
         if report_terminal:
-            await self._request_json("POST", "/api/auto-update/report-terminal-info", self._terminal_payload())
+            await self.report_terminal_info()
         response = await self._request_json("POST", "/api/auto-update/check", self._check_payload())
         data = response.get("data")
         if not isinstance(data, dict) or data.get("hasUpdate") is not True:

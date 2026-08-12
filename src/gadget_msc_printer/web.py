@@ -698,8 +698,18 @@ class ConfigWebApp:
     async def update_config(self, request: web.Request) -> web.Response:
         payload = await request.json()
         center_url = str(payload.get("center_url", "")).strip()
+        organization = payload.get("organization")
+        if not isinstance(organization, dict):
+            return web.json_response({"ok": False, "error": "organization must be an object"}, status=400)
         try:
-            return web.json_response(await self.updater.configure(center_url))
+            result = await self.updater.configure(
+                center_url,
+                {key: str(value).strip() for key, value in organization.items()},
+            )
+            config = load_config(self.config_path)
+            self.config = config
+            self.uploader.update_config(config.upload)
+            return web.json_response(result)
         except UpdaterClientError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=503)
 

@@ -50,6 +50,14 @@ upload:
   max_attempts: 3
   user_agent: K2B-H618-Gadget-Gateway
 
+# Company update strategy identity. hospital_code is shared with upload.hospital_code.
+company_update:
+  hospital_id: ""
+  hospital_area_code: ""
+  hospital_area_id: ""
+  dept_code: ""
+  dept_id: ""
+
 cleanup:
   enabled: true
   interval_hours: 24

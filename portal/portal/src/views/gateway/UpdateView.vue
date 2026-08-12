@@ -63,12 +63,42 @@
     <section class="surface">
       <div class="surface-heading">
         <div>
-          <h2>公司升级服务</h2>
-          <p class="section-note">只允许填写 HTTP 或 HTTPS 服务根地址，不支持账号、路径和查询参数。</p>
+          <h2>公司升级配置</h2>
+          <p class="section-note">保存后立即同步终端信息。医院编码同时用于报告上传和升级策略匹配。</p>
         </div>
-        <el-button type="primary" plain :loading="savingConfig" :disabled="!status.available" @click="saveConfig">保存地址</el-button>
+        <el-button type="primary" plain :loading="savingConfig" :disabled="!status.available" @click="saveConfig">
+          保存并同步
+        </el-button>
       </div>
-      <el-input v-model.trim="centerUrl" maxlength="512" placeholder="例如：http://192.168.112.229:28080" />
+      <el-form label-position="top" class="company-config-form">
+        <el-form-item label="公司服务地址" class="full-row">
+          <el-input v-model.trim="companyForm.center_url" maxlength="512" placeholder="例如：http://192.168.112.229:28080" />
+        </el-form-item>
+        <el-form-item label="医院编码">
+          <el-input v-model.trim="companyForm.hospital_code" maxlength="128" placeholder="例如：tejian01" />
+        </el-form-item>
+        <el-form-item label="医院ID（选填）">
+          <el-input v-model.trim="companyForm.hospital_id" maxlength="128" />
+        </el-form-item>
+        <el-form-item label="院区编码（选填）">
+          <el-input v-model.trim="companyForm.hospital_area_code" maxlength="128" />
+        </el-form-item>
+        <el-form-item label="院区ID（选填）">
+          <el-input v-model.trim="companyForm.hospital_area_id" maxlength="128" />
+        </el-form-item>
+        <el-form-item label="科室编码（选填）">
+          <el-input v-model.trim="companyForm.dept_code" maxlength="128" />
+        </el-form-item>
+        <el-form-item label="科室ID（选填）">
+          <el-input v-model.trim="companyForm.dept_id" maxlength="128" />
+        </el-form-item>
+      </el-form>
+      <div class="sync-result">
+        <el-tag :type="status.last_terminal_report_error ? 'danger' : status.last_terminal_report_at ? 'success' : 'info'" effect="light">
+          {{ terminalSyncStatus }}
+        </el-tag>
+        <span v-if="status.last_terminal_report_error" class="error-text">{{ status.last_terminal_report_error }}</span>
+      </div>
     </section>
 
     <section class="surface">
@@ -101,7 +131,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { CircleCheck, Download, Refresh, RefreshLeft, Search } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, errorMessage } from "@/api/client";
@@ -113,7 +143,16 @@ const downloading = ref(false);
 const installing = ref(false);
 const rollingBack = ref(false);
 const mobileLayout = ref(window.innerWidth <= 640);
-const centerUrl = ref("");
+const companyForm = reactive({
+  center_url: "",
+  hospital_code: "",
+  hospital_id: "",
+  hospital_area_code: "",
+  hospital_area_id: "",
+  dept_code: "",
+  dept_id: ""
+});
+const formLoaded = ref(false);
 const status = ref({ available: false, update: null, download: null, network: {} });
 
 const update = computed(() => status.value.update || null);
@@ -134,6 +173,11 @@ const operationStatus = computed(() => {
   return "正在安装";
 });
 const descriptionColumns = computed(() => mobileLayout.value ? 1 : 2);
+const terminalSyncStatus = computed(() => {
+  if (status.value.last_terminal_report_error) return "终端信息同步失败";
+  if (status.value.last_terminal_report_at) return `已同步 · ${formatTime(status.value.last_terminal_report_at)}`;
+  return "尚未同步";
+});
 let statusTimer = 0;
 
 function updateViewport() {
@@ -156,7 +200,10 @@ async function loadStatus(silent = false) {
   try {
     const { data } = await api.get("/api/update/status");
     status.value = data;
-    centerUrl.value = data.center_url || "";
+    if (!silent || !formLoaded.value) {
+      Object.assign(companyForm, { center_url: data.center_url || "", ...(data.organization || {}) });
+      formLoaded.value = true;
+    }
   } catch (error) {
     if (!silent) ElMessage.error(errorMessage(error, "读取升级状态失败"));
   } finally {
@@ -167,12 +214,21 @@ async function loadStatus(silent = false) {
 async function saveConfig() {
   savingConfig.value = true;
   try {
-    const { data } = await api.put("/api/update/config", { center_url: centerUrl.value });
+    if (!companyForm.hospital_code) {
+      ElMessage.warning("请填写医院编码");
+      return;
+    }
+    const { center_url, ...organization } = companyForm;
+    const { data } = await api.put("/api/update/config", { center_url, organization });
     status.value = { ...status.value, ...data, available: true };
-    centerUrl.value = data.center_url || centerUrl.value;
-    ElMessage.success("公司升级服务地址已保存");
+    Object.assign(companyForm, { center_url: data.center_url || center_url, ...(data.organization || {}) });
+    if (data.last_terminal_report_error) {
+      ElMessage.warning("升级配置已保存，但终端信息同步失败，可稍后再次保存或检查更新");
+    } else {
+      ElMessage.success("升级配置已保存，终端信息已同步");
+    }
   } catch (error) {
-    ElMessage.error(errorMessage(error, "保存升级服务地址失败"));
+    ElMessage.error(errorMessage(error, "保存或同步升级配置失败"));
   } finally {
     savingConfig.value = false;
   }
@@ -275,10 +331,22 @@ onBeforeUnmount(() => {
   strong { margin-top: 5px; overflow-wrap: anywhere; color: #23354d; }
 }
 .update-descriptions { margin-top: 10px; }
+.company-config-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 16px;
+
+  .full-row { grid-column: 1 / -1; }
+}
+.sync-result { display: flex; align-items: center; gap: 12px; min-height: 28px; }
 @media (max-width: 980px) {
   .update-summary, .update-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .company-config-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   .update-summary, .update-meta-grid { grid-template-columns: 1fr; }
+  .company-config-form { grid-template-columns: 1fr; }
+  .company-config-form .full-row { grid-column: auto; }
+  .sync-result { align-items: flex-start; flex-direction: column; }
 }
 </style>
