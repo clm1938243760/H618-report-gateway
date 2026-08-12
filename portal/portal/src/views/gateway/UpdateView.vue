@@ -86,7 +86,7 @@
             <el-option label="Linux ARM64" value="linux-arm64" />
           </el-select>
         </el-form-item>
-        <el-form-item label="公司服务地址" class="full-row">
+        <el-form-item label="系统升级中心" class="full-row">
           <el-input v-model.trim="companyForm.center_url" maxlength="512" placeholder="例如：http://192.168.112.229:28080" />
         </el-form-item>
         <el-form-item label="医院编码">
