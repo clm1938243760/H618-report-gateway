@@ -72,10 +72,17 @@
             <span>子网前缀</span>
             <el-select
               v-model="wiredIpForm.prefix_length"
+              filterable
+              allow-create
+              default-first-option
+              :reserve-keyword="false"
               :disabled="wiredIpForm.mode === 'dhcp'"
-              @change="autoFillIpv4(wiredIpForm)"
+              placeholder="输入或选择，如 /24"
+              :filter-method="filterWiredPrefixes"
+              @visible-change="resetWiredPrefixFilter"
+              @change="onPrefixChange(wiredIpForm, $event)"
             >
-              <el-option v-for="item in prefixOptions" :key="item.value" :label="item.label" :value="item.value" />
+              <el-option v-for="item in wiredPrefixOptions" :key="item.value" :label="item.label" :value="item.value" />
             </el-select>
           </label>
           <label class="ipv4-field">
@@ -223,10 +230,17 @@
             <span>子网前缀</span>
             <el-select
               v-model="wifiIpForm.prefix_length"
+              filterable
+              allow-create
+              default-first-option
+              :reserve-keyword="false"
               :disabled="!wifi.connected || wifiIpForm.mode === 'dhcp'"
-              @change="autoFillIpv4(wifiIpForm)"
+              placeholder="输入或选择，如 /24"
+              :filter-method="filterWifiPrefixes"
+              @visible-change="resetWifiPrefixFilter"
+              @change="onPrefixChange(wifiIpForm, $event)"
             >
-              <el-option v-for="item in prefixOptions" :key="item.value" :label="item.label" :value="item.value" />
+              <el-option v-for="item in wifiPrefixOptions" :key="item.value" :label="item.label" :value="item.value" />
             </el-select>
           </label>
           <label class="ipv4-field">
@@ -451,14 +465,22 @@ const wifiIpForm = reactive({
 });
 const wiredIpIdentity = ref("");
 const wifiIpIdentity = ref("");
+const wiredPrefixQuery = ref("");
+const wifiPrefixQuery = ref("");
 
-const prefixOptions = Array.from({ length: 30 }, (_, index) => {
-  const value = index + 1;
+const preferredPrefixes = [24, 16, 8, 20, 21, 22, 23, 25, 26, 27, 28, 29, 30];
+const prefixValues = [
+  ...preferredPrefixes,
+  ...Array.from({ length: 30 }, (_, index) => index + 1).filter((value) => !preferredPrefixes.includes(value))
+];
+const prefixOptions = prefixValues.map((value) => {
   return { value, label: `/${value} · ${prefixToMask(value)}` };
 });
 
 const wiredIp = computed(() => (wired.addresses?.[0] || "").split("/")[0]);
 const wifiIp = computed(() => (wifi.addresses?.[0] || "").split("/")[0]);
+const wiredPrefixOptions = computed(() => matchingPrefixOptions(wiredPrefixQuery.value));
+const wifiPrefixOptions = computed(() => matchingPrefixOptions(wifiPrefixQuery.value));
 const wifiClientDevices = computed(() => wifi.devices.filter((item) => !(hotspot.active && item.device === hotspot.device)));
 const hotspotIdleText = computed(() => {
   if (!hotspot.active) return "热点未开启";
@@ -484,6 +506,57 @@ function fillIpv4Form(form, status) {
 function prefixToMask(prefix) {
   const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
   return [24, 16, 8, 0].map((shift) => (mask >>> shift) & 255).join(".");
+}
+
+function parsePrefix(value) {
+  const text = String(value ?? "").trim();
+  const numeric = text.replace(/^\//, "");
+  if (/^\d{1,2}$/.test(numeric)) {
+    const prefix = Number(numeric);
+    return prefix >= 1 && prefix <= 30 ? prefix : null;
+  }
+  return prefixOptions.find((item) => item.label.endsWith(text) || prefixToMask(item.value) === text)?.value ?? null;
+}
+
+function matchingPrefixOptions(query) {
+  const text = String(query || "").trim().toLowerCase();
+  if (!text) return prefixOptions;
+  const normalized = text.replace(/^\//, "");
+  const exact = [];
+  const partial = [];
+  prefixOptions.forEach((item) => {
+    const prefix = String(item.value);
+    const mask = prefixToMask(item.value);
+    if (text === `/${prefix}` || normalized === prefix || text === mask) exact.push(item);
+    else if (`/${prefix}`.includes(text) || prefix.startsWith(normalized) || mask.includes(text)) partial.push(item);
+  });
+  return [...exact, ...partial];
+}
+
+function filterWiredPrefixes(query) {
+  wiredPrefixQuery.value = query;
+}
+
+function filterWifiPrefixes(query) {
+  wifiPrefixQuery.value = query;
+}
+
+function resetWiredPrefixFilter(visible) {
+  if (!visible) wiredPrefixQuery.value = "";
+}
+
+function resetWifiPrefixFilter(visible) {
+  if (!visible) wifiPrefixQuery.value = "";
+}
+
+function onPrefixChange(form, value) {
+  const prefix = parsePrefix(value);
+  if (prefix === null) {
+    ElMessage.warning("请输入 /1 至 /30 的子网前缀，或输入对应的子网掩码");
+    return;
+  }
+  form.prefix_length = prefix;
+  autoFillIpv4(form);
 }
 
 function ipv4ToInteger(address) {
@@ -595,6 +668,7 @@ async function saveIpv4(interfaceType) {
   }
 
   const dns = dnsValues(form.dns);
+  const prefix = parsePrefix(form.prefix_length);
   if (form.mode === "manual") {
     if (!isIpv4(form.address)) {
       ElMessage.error("请输入有效的固定 IP 地址");
@@ -604,13 +678,18 @@ async function saveIpv4(interfaceType) {
       ElMessage.error("请输入有效的默认网关");
       return;
     }
+    if (prefix === null) {
+      ElMessage.error("子网前缀必须为 /1 至 /30，或对应的子网掩码");
+      return;
+    }
     if (dns.some((item) => !isIpv4(item))) {
       ElMessage.error("DNS 服务器格式不正确，多个地址请用逗号分隔");
       return;
     }
   }
 
-  const destination = form.mode === "manual" ? `${form.address}/${form.prefix_length}` : "由网络自动分配";
+  if (prefix !== null) form.prefix_length = prefix;
+  const destination = form.mode === "manual" ? `${form.address}/${prefix}` : "由网络自动分配";
   try {
     await ElMessageBox.confirm(
       `${label}将切换为“${ipv4ModeLabel(form.mode)}”，地址为 ${destination}。应用时该网卡会短暂断开。`,
@@ -632,7 +711,7 @@ async function saveIpv4(interfaceType) {
       device: status.device,
       mode: form.mode,
       address: form.mode === "manual" ? form.address.trim() : "",
-      prefix_length: Number(form.prefix_length),
+      prefix_length: prefix ?? 24,
       gateway: form.mode === "manual" ? form.gateway.trim() : "",
       dns: form.mode === "manual" ? dns : []
     });

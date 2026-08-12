@@ -1,6 +1,6 @@
 {
   "name": "kickpi-k2b-report-gateway-portal",
-  "version": "0.22.2",
+  "version": "0.22.3",
   "private": true,
   "type": "module",
   "scripts": {
