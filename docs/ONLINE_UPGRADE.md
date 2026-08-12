@@ -1,161 +1,145 @@
-# 在线升级与驱动发布
+# 公司在线升级
 
-本模块用于更新 H618 报告网关的应用、Vue 管理页面、Python 依赖和经过审核的
-Linux 打印机驱动。它不升级内核、U-Boot、设备树或完整系统镜像。
+H618 报告网关从 `v0.22.0` 起直接接入公司升级平台，不再使用本地 Windows 升级中心、
+配对码、代理令牌或 `.jvpkg`。升级范围仅包括网关应用、Vue 管理页面和 Python 代码，
+不升级内核、U-Boot、设备树或完整 Armbian 镜像。
 
-## 设计边界
+## 工作流程
 
 ```text
-Windows 升级中心 -- HTTPS / Cloudflare Tunnel --> 板端主动签到代理
-                                                |
-                                                +-- 已签名 .jvpkg 下载与校验
-                                                +-- 原子切换 /opt/gadget-msc-printer
-                                                +-- 127.0.0.1:8765 本机 API
-管理浏览器 -- HTTPS 443 / 8443 --> 板端配置页面 -- 代理本机 API
+板子开机
+  -> POST /api/auto-update/report-terminal-info
+  -> POST /api/auto-update/check
+  -> 使用 check 返回的临时 downloadUrl 下载 ZIP
+  -> POST /api/auto-update/report 上报下载、安装结果
+  -> 健康检查失败时自动回滚
+  -> POST /api/auto-update/rollback-report 上报回滚结果
 ```
 
-- 板端主动向中心签到；中心不直接连接设备，不提供远程 Shell、任意命令或在线文件编辑。
-- 浏览器只访问原有 HTTPS 管理页面。更新代理固定监听 `127.0.0.1:8765`，不能从局域网访问。
-- 程序版本位于 `/opt/jvlei/releases/gateway/<version>/`，
-  `/opt/gadget-msc-printer` 是当前版本的符号链接。
-- 现场配置和报告数据永远保留在 `/etc/gadget-msc-printer/`、
-  `/var/lib/gadget-msc-printer/`，发布包不得覆盖这些目录。
-- 当前版本只保留运行版本和一个可回滚版本。
+- 固定 `appCode=linux`、`platform=linux-arm64`。
+- 当前 IP 和 MAC 根据到公司服务器的实际路由动态获取。
+- `hospitalCode` 读取 `/etc/gadget-msc-printer/config.yaml` 中的
+  `upload.hospital_code`；其他未配置的可选字段不发送。
+- 开机只检查一次，失败不周期重试。恢复网络后可在 HTTPS 管理页手动检查。
+- `autoUpgrade=true` 时自动下载和安装；`false` 时只展示更新，等待网页操作。
+- 第一版仅使用 `/check` 返回的临时链接。链接下载失败时重新调用 `/check` 刷新一次，
+  不调用当前需要 JWT 的 `/api/auto-update/package/{packageId}`。
 
-## 版本包与签名
+默认公司服务地址：
 
-升级包扩展名为 `.jvpkg`，其中只有三个顶层文件：
+```text
+http://192.168.112.229:28080
+```
+
+## 公司 ZIP 规范
+
+上传到公司版本管理的文件扩展名为 `.zip`，顶层必须且只能包含：
 
 ```text
 manifest.json
 payload.tar.gz
-signature.bin
 ```
 
-`manifest.json` 使用确定性 JSON，包含产品、版本、兼容来源版本、目标架构、Git
-提交、迁移级别、SHA-256、包大小、发布说明和服务重启要求。板端先校验外层文件清单、
-JSON、大小、哈希与 Ed25519 签名，再安全解压；绝对路径、`..`、链接、设备文件、FIFO
-和异常大的包都会拒绝。
+`manifest.json` 关键字段：
 
-应用更新只接受 `package_type: application`。中心下发的打印驱动使用
-`package_type: printer_driver`，且必须为已签名包；含 DEB root 安装脚本的驱动会被拒绝，
-只能在板端“实体打印驱动”页面进行本地二次确认。
-
-## 首次搭建升级中心
-
-在 Windows 开发电脑的项目根目录执行。私钥只能保留在发布电脑，不要提交 Git、不要
-复制到板子。
-
-```powershell
-py -3.14 scripts/generate_update_keys.py `
-  --private-key .\update_center_data\keys\update-private.pem `
-  --public-key .\update_center_data\keys\update-public.pem
-
-py -3.14 scripts/generate_center_tls.py `
-  --cert .\update_center_data\tls.crt `
-  --key .\update_center_data\tls.key `
-  --common-name update.jvlei.com
-
-Copy-Item .\update_center\config.example.yaml .\update_center\config.yaml
+```json
+{
+  "schemaVersion": 1,
+  "packageType": "application",
+  "appCode": "linux",
+  "product": "h618-report-gateway",
+  "version": "v0.22.0",
+  "platform": "linux-arm64",
+  "architecture": "arm64",
+  "compatibleFrom": ["v0.21.3"],
+  "payload": {
+    "path": "payload.tar.gz",
+    "format": "tar.gz",
+    "size": 0,
+    "sha256": "64位十六进制SHA-256",
+    "fileCount": 0
+  },
+  "install": {
+    "mode": "atomic_release",
+    "requiresGadgetRestart": false,
+    "requiresCupsRestart": false,
+    "healthUrl": "https://127.0.0.1:8443/health"
+  }
+}
 ```
 
-编辑 `update_center/config.yaml`：
+板端强制检查公司响应中的包大小、ZIP CRC、固定顶层文件、payload 大小和 SHA-256、
+tar 内部文件数量、总展开体积与安全路径。绝对路径、`..`、重复路径、软硬链接、FIFO、
+设备文件、错误平台和不兼容版本全部拒绝。当前测试阶段 ZIP 没有数字签名，生产签名应在
+后续版本增加。
 
-- 修改 `username`、至少 12 位的 `password`；
-- 将 `public_key_file` 指向 `update-public.pem`；
-- 将 `tls_cert`、`tls_key` 指向上面生成的 TLS 文件；
-- 生产环境保持 `allow_unsigned_packages: false`。
+## 构建升级包
 
-启动中心：
-
-```powershell
-.\update_center\run.ps1
-```
-
-管理端为 `https://<电脑IP>:9443`。它只适合可信局域网使用；默认设备 API 仅监听
-`127.0.0.1:9444`。
-
-若使用 Cloudflare Named Tunnel，将公开域名只映射到设备 API：
-
-```yaml
-tunnel: <tunnel-id>
-credentials-file: C:\secure\cloudflared\<tunnel-id>.json
-ingress:
-  - hostname: update.jvlei.com
-    service: http://127.0.0.1:9444
-  - service: http_status:404
-```
-
-不要把 `9443` 管理端通过该 Tunnel 暴露到公网。
-
-## 板端启用
-
-安装 `v0.21` 后，升级代理服务名为 `jvlei-updater.service`。安装公钥并编辑配置：
-
-```bash
-sudo install -D -m 0644 /tmp/update-public.pem /etc/jvlei-updater/update-public.pem
-sudoedit /etc/jvlei-updater/config.yaml
-sudo systemctl daemon-reload
-sudo systemctl enable --now jvlei-updater.service
-sudo systemctl status jvlei-updater.service --no-pager
-```
-
-至少确认以下字段：
-
-```yaml
-center_url: "https://update.jvlei.com"
-allow_unsigned_packages: false
-install_policy: "local_confirm"
-```
-
-在板端 HTTPS 页面进入“软件升级”，用升级中心生成的一次性配对码完成配对。配对后会
-保存独立 `agent_id` 与令牌；令牌文件为 `/etc/jvlei-updater/device.token`，权限 `0600`。
-
-默认每 60 秒签到一次，失败采用指数退避，最长间隔 30 分钟。`local_confirm` 是默认
-策略：中心可以下发和下载，安装必须由本机页面确认。只有板端管理员可以改为
-`remote_allowed`。
-
-## 发布应用更新
-
-前端先在开发电脑构建：
+先构建 Vue，再从项目根目录生成公司 ZIP：
 
 ```powershell
 pnpm --dir portal\portal build
-py -3.14 scripts/build_jvpkg.py `
-  --version 0.21.0 `
-  --compatible-from 0.20.0 `
-  --output .\output\h618-report-gateway-0.21.0.jvpkg `
-  --private-key .\update_center_data\keys\update-private.pem `
-  --notes "v0.21 在线升级与打印驱动管理"
+py -3.14 scripts\build_company_update_zip.py `
+  --version 0.22.0 `
+  --compatible-from 0.21.3 `
+  --output .\output\h618-report-gateway-v0.22.0-linux-arm64.zip `
+  --notes "v0.22.0 接入公司在线升级接口"
 ```
 
-在升级中心上传并校验该包，选择一个设备或设备分组下发“下载”或“安装”。板端下载后会
-再次验证签名；应用安装时先等待正在上传的报告（最多 90 秒），随后切换符号链接、重启
-网页和采集服务，并访问本机 `/health` 确认版本。失败时恢复旧链接和旧服务。
+脚本会同时生成 `.zip.sha256`，并调用板端相同的校验器进行自检。公司版本列表填写：
 
-## 发布中心审核驱动
-
-支持 ARM64/all 的 DEB、PPD/PPD.GZ、以及含 PPD 和 ARM64 Filter 的 ZIP、TAR、TGZ、
-TAR.GZ。生成中心驱动包：
-
-```powershell
-py -3.14 scripts/build_driver_jvpkg.py `
-  --source .\drivers\approved-model.ppd `
-  --version 2026.08.06 `
-  --output .\output\approved-model.jvpkg `
-  --private-key .\update_center_data\keys\update-private.pem `
-  --notes "已审核的现场打印机驱动"
+```text
+应用编码：linux
+版本号：v0.22.0
+运行平台：linux-arm64
+安装包：h618-report-gateway-v0.22.0-linux-arm64.zip
 ```
 
-中心下发后，板端按同一签名和兼容性校验流程处理。现场来源不明的原始驱动不要通过中心
-远程安装，应从板端“实体打印驱动”页面上传；该页面会显示厂商、型号、架构、PPD、CUPS
-Filter、依赖、DEB 安装脚本和风险，再由登录用户确认。
+升级策略中可按医院、院区、科室、IP 或 MAC 选择终端。板端当前只上报已配置的
+`hospitalCode`，以及实际联网 IP/MAC；若策略使用医院维度，需保证业务配置中的医院编码
+与平台一致。
 
-## 回滚与故障排查
+## 安装和回滚
 
-- 管理页面“软件升级”可回滚应用到上一版本。
-- 驱动页面的回滚只恢复 CUPS 队列和已审核驱动注册表；它不会盲目卸载未知 DEB。
-- `sudo systemctl status jvlei-updater.service gadget-web.service gadget-collector.service --no-pager`
-  用于查看服务状态。
-- `sudo journalctl -u jvlei-updater.service -n 150 --no-pager` 用于查看下载、签名或健康检查失败。
-- 中心离线、DNS 或 Tunnel 故障不会中断报告采集和上传；代理只记录错误并延迟重试。
+应用版本位于：
+
+```text
+/opt/jvlei/releases/gateway/<version>/
+/opt/gadget-msc-printer -> 当前版本
+```
+
+安装前最多等待 90 秒让正在上传的报告完成，并将 `/etc/gadget-msc-printer` 备份到
+`/var/lib/jvlei-updater/backups`。报告、SQLite 和打印流数据始终保留在
+`/var/lib/gadget-msc-printer`，不会被升级包覆盖。
+
+安装默认只重启 `gadget-collector.service` 和 `gadget-web.service`。只有 Manifest 明确要求时
+才重启 CUPS 或 USB Gadget。安装后验证两个业务服务和 `/health` 版本；失败立即恢复旧软链接。
+仅保留当前版和一个可回滚版。
+
+网页点击安装或回滚后，代理先返回“任务已启动”，再在后台停服务和切换版本。页面短暂离线
+属于正常现象，恢复后会每 3 秒读取最新状态。
+
+## 首次 SSH 引导
+
+从旧版本第一次切换到公司升级代理时，需要通过 SSH 部署一次新代理和配置：
+
+```bash
+cd /tmp/gateway
+sudo bash scripts/bootstrap_company_updater.sh
+```
+
+脚本先将现有更新配置、状态和服务启用状态备份到
+`/var/backups/jvlei-updater-company-bootstrap/<UTC时间>/`，然后只切换更新代理。
+当前应用仍保持原版本；后续应用和更新代理都随公司 ZIP 更新。
+
+## 排查命令
+
+```bash
+sudo systemctl status jvlei-updater.service gadget-web.service gadget-collector.service --no-pager
+sudo journalctl -u jvlei-updater.service -n 200 --no-pager
+curl -sS http://127.0.0.1:8765/status
+curl -ksS https://127.0.0.1:8443/health
+```
+
+公司状态上报失败不会回滚已经健康运行的新版本。未成功上报的结果会写入本地队列，并在
+下次开机检查或网页操作前补发。

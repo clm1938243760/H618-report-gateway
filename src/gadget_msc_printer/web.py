@@ -128,12 +128,11 @@ class ConfigWebApp:
                 web.put("/api/hotspot/config", self.put_hotspot_config),
                 web.post("/api/hotspot/switch", self.switch_hotspot),
                 web.get("/api/update/status", self.update_status),
-                web.post("/api/update/pair", self.update_pair),
                 web.post("/api/update/check", self.update_check),
                 web.post("/api/update/download", self.update_download),
                 web.post("/api/update/install", self.update_install),
                 web.post("/api/update/rollback", self.update_rollback),
-                web.put("/api/update/policy", self.update_policy),
+                web.put("/api/update/config", self.update_config),
             ]
         )
 
@@ -157,7 +156,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.21.2"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.0"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
@@ -672,16 +671,6 @@ class ConfigWebApp:
     async def update_status(self, request: web.Request) -> web.Response:
         return web.json_response(await self.updater.status())
 
-    async def update_pair(self, request: web.Request) -> web.Response:
-        payload = await request.json()
-        code = str(payload.get("pairing_code", "")).strip()
-        if not 1 <= len(code) <= 128:
-            return web.json_response({"ok": False, "error": "配对码格式无效"}, status=400)
-        try:
-            return web.json_response(await self.updater.pair(code))
-        except UpdaterClientError as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=503)
-
     async def update_check(self, request: web.Request) -> web.Response:
         try:
             return web.json_response(await self.updater.check())
@@ -706,11 +695,11 @@ class ConfigWebApp:
         except UpdaterClientError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=503)
 
-    async def update_policy(self, request: web.Request) -> web.Response:
+    async def update_config(self, request: web.Request) -> web.Response:
         payload = await request.json()
-        policy = str(payload.get("install_policy", "")).strip()
+        center_url = str(payload.get("center_url", "")).strip()
         try:
-            return web.json_response(await self.updater.set_policy(policy))
+            return web.json_response(await self.updater.configure(center_url))
         except UpdaterClientError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=503)
 

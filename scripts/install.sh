@@ -73,6 +73,50 @@ mv -Tf "$UPDATER_ROOT/current.next" "$UPDATER_ROOT/current"
 if [[ ! -s "$UPDATER_CONFIG_DIR/config.yaml" ]]; then
   install -m 0640 "$SRC/updater.example.yaml" "$UPDATER_CONFIG_DIR/config.yaml"
 fi
+python3 - "$UPDATER_CONFIG_DIR/config.yaml" "$SRC/updater.example.yaml" <<'PY'
+from pathlib import Path
+import os
+import sys
+import tempfile
+import yaml
+
+path = Path(sys.argv[1])
+defaults = yaml.safe_load(Path(sys.argv[2]).read_text(encoding="utf-8")) or {}
+current = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+if not isinstance(current, dict):
+    current = {}
+legacy_center = str(current.get("center_url", "")).strip()
+for key in (
+    "agent_id",
+    "token_file",
+    "public_key_file",
+    "check_interval_seconds",
+    "max_backoff_seconds",
+    "install_policy",
+):
+    current.pop(key, None)
+for key, value in defaults.items():
+    current.setdefault(key, value)
+if legacy_center in {"", "https://update.jvlei.com"} or ":9444" in legacy_center:
+    current["center_url"] = defaults["center_url"]
+current["allow_unsigned_packages"] = True
+current["health_url"] = defaults["health_url"]
+text = yaml.safe_dump(current, allow_unicode=True, sort_keys=False)
+fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temp_name, 0o640)
+    os.replace(temp_name, path)
+except Exception:
+    try:
+        os.unlink(temp_name)
+    except FileNotFoundError:
+        pass
+    raise
+PY
 
 K2B_OVERLAY_SELECTED=0
 BOARD_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"

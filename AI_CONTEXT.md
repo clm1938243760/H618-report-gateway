@@ -20,6 +20,10 @@
 7. GhostPDL 10.07.1 已按授权仅安装到当前测试板；PCL/PCL XL 直接转换和
    `PdfConverter` 业务转换均通过。
 8. 最终验收结果为 `failures=0 warnings=0`。
+9. `v0.22.0` 已改为公司在线升级接口：`appCode=linux`、`platform=linux-arm64`，
+   公司服务默认 `http://192.168.112.229:28080`。
+10. 旧 Windows 升级中心、配对码、设备令牌和 `.jvpkg` 已停用；正式应用升级包是
+    `manifest.json + payload.tar.gz` 的 ZIP。
 
 ## 不能跳过的实板检查
 

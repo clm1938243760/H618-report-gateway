@@ -206,63 +206,75 @@ class FakeCupsManager:
 
 class FakeUpdaterClient:
     def __init__(self) -> None:
-        self.policy = "local_confirm"
-        self.paired = False
+        self.center_url = "http://192.168.112.229:28080"
         self.calls: list[str] = []
 
     def _status(self):
         return {
             "ok": True,
             "available": True,
-            "paired": self.paired,
-            "agent_id": "h618-test" if self.paired else "",
-            "center_url": "https://update.example.test",
-            "install_policy": self.policy,
-            "allow_unsigned_packages": False,
-            "current_version": "0.20.0",
-            "previous_version": "0.19.0",
-            "assignment": None,
+            "center_url": self.center_url,
+            "app_code": "linux",
+            "platform": "linux-arm64",
+            "allow_unsigned_packages": True,
+            "current_version": "v0.21.3",
+            "current_version_id": "21",
+            "previous_version": "v0.21.2",
+            "update": None,
             "download": None,
-            "last_check_at": 0,
-            "last_success_at": 0,
+            "network": {
+                "interface": "eth0",
+                "ip": "192.168.20.144",
+                "mac": "02:00:89:BD:16:D6",
+            },
+            "last_check_at": "",
+            "last_terminal_report_at": "",
             "last_error": "",
+            "pending_reports": 0,
+            "installing": False,
         }
 
     async def status(self):
         return self._status()
 
-    async def pair(self, pairing_code: str):
-        self.calls.append(f"pair:{pairing_code}")
-        self.paired = True
-        return self._status()
-
     async def check(self):
         self.calls.append("check")
         value = self._status()
-        value["assignment"] = {"id": "assignment-1", "action": "download", "status": "queued", "package": {"version": "0.21.0"}}
+        value["update"] = {
+            "record_id": "1001",
+            "version": "v0.22.0",
+            "version_id": "22",
+            "package_size": 4096,
+            "auto_upgrade": False,
+            "release_note": "company update",
+        }
         return value
 
     async def download(self):
         self.calls.append("download")
         value = self._status()
-        value["download"] = {"ready": True, "manifest": {"version": "0.21.0"}, "signed": True}
+        value["download"] = {
+            "ready": True,
+            "path": "/var/lib/jvlei-updater/downloads/v0.22.0.zip",
+            "manifest": {"server_version": "v0.22.0"},
+        }
         return value
 
     async def install(self):
         self.calls.append("install")
         value = self._status()
-        value["current_version"] = "0.21.0"
+        value["current_version"] = "v0.22.0"
         return value
 
     async def rollback(self):
         self.calls.append("rollback")
         value = self._status()
-        value["current_version"] = "0.19.0"
+        value["current_version"] = "v0.21.2"
         return value
 
-    async def set_policy(self, install_policy: str):
-        self.calls.append(f"policy:{install_policy}")
-        self.policy = install_policy
+    async def configure(self, center_url: str):
+        self.calls.append(f"config:{center_url}")
+        self.center_url = center_url
         return self._status()
 
 
@@ -356,29 +368,25 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/api/update/status", headers=headers)
         payload = await response.json()
         self.assertTrue(payload["available"])
-        self.assertFalse(payload["paired"])
-
-        response = await self.client.post("/api/update/pair", headers=headers, json={"pairing_code": "A2F6M8"})
-        self.assertEqual(response.status, 200)
-        self.assertTrue((await response.json())["paired"])
+        self.assertEqual(payload["app_code"], "linux")
 
         response = await self.client.post("/api/update/check", headers=headers, json={})
         self.assertEqual(response.status, 200)
-        self.assertEqual((await response.json())["assignment"]["package"]["version"], "0.21.0")
+        self.assertEqual((await response.json())["update"]["version"], "v0.22.0")
 
         response = await self.client.post("/api/update/download", headers=headers, json={})
         self.assertEqual(response.status, 200)
         self.assertTrue((await response.json())["download"]["ready"])
 
         response = await self.client.put(
-            "/api/update/policy",
+            "/api/update/config",
             headers=headers,
-            json={"install_policy": "remote_allowed"},
+            json={"center_url": "http://192.168.112.230:28080"},
         )
         self.assertEqual(response.status, 200)
-        self.assertEqual((await response.json())["install_policy"], "remote_allowed")
+        self.assertEqual((await response.json())["center_url"], "http://192.168.112.230:28080")
         self.assertIn("download", self.updater.calls)
-        self.assertIn("policy:remote_allowed", self.updater.calls)
+        self.assertIn("config:http://192.168.112.230:28080", self.updater.calls)
 
     async def test_driver_upload_is_analyzed_before_installation(self) -> None:
         token, csrf = await self._login()

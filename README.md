@@ -1,7 +1,7 @@
 # KICKPI K2B MSC / Printer 报告网关
 
-当前发布版本：`v0.21`。完整功能、验证结果和部署注意事项见
-[v0.21 版本说明](docs/RELEASE_NOTES_v0.21.md)。
+当前开发版本：`v0.22.0`。完整变更和部署注意事项见
+[v0.22.0 版本说明](docs/RELEASE_NOTES_v0.22.0.md)。
 
 本项目是 RK3566 报告网关的独立迁移版本，目标硬件为 KICKPI K2B（Allwinner
 H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发和部署改动。
@@ -43,8 +43,8 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 - 报告日志支持直接下载板端留存的 PDF。
 - 网络配置页统一显示有线 IP、Wi-Fi 状态和附近网络，并支持无线连接、断开和忘记网络。
 - 维护热点使用 `wlan1` 提供 `192.168.0.1/24` 管理网络，可配置 SSID、密码、开机自启和无人连接自动关闭。
-- 在线升级采用板端主动签到、Ed25519 签名 `.jvpkg`、原子切换和自动回滚；默认本机确认安装。
-- 支持本地审核导入或中心签名下发的实体打印驱动，并通过 CUPS 创建队列和打印测试页。
+- 在线升级直接接入公司平台，开机上报终端并检查一次，使用公司 ZIP、原子切换和自动回滚。
+- 支持在板端本地审核导入实体打印驱动，并通过 CUPS 创建队列和打印测试页。
 
 所有模式共用一个 USB Device Controller，同一时刻只绑定一个 Gadget。
 
@@ -138,7 +138,6 @@ scripts/                  预检、USB gadget、安装和维护脚本
 overlays/                 K2B USB0 peripheral 设备树覆盖层
 systemd/                  板端服务单元
 tests/                    Python 回归测试
-update_center/            Windows 手动启动的升级中心
 docs/                     迁移、架构和产品资料
 MIGRATION_SOURCE.md       本迁移副本的来源记录
 ```

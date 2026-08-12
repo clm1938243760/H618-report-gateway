@@ -1,13 +1,12 @@
 enabled: true
-center_url: "https://update.jvlei.com"
+center_url: "http://192.168.112.229:28080"
+app_code: "linux"
+platform: "linux-arm64"
 product: "h618-report-gateway"
-agent_id: ""
-token_file: "/etc/jvlei-updater/device.token"
-public_key_file: "/etc/jvlei-updater/update-public.pem"
-check_interval_seconds: 60
-max_backoff_seconds: 1800
-install_policy: "local_confirm"
-allow_unsigned_packages: false
+business_config_file: "/etc/gadget-msc-printer/config.yaml"
+config_dir: "/etc/gadget-msc-printer"
+boot_check: true
+allow_unsigned_packages: true
 keep_previous_versions: 1
 state_dir: "/var/lib/jvlei-updater"
 application_path: "/opt/gadget-msc-printer"
@@ -19,4 +18,4 @@ active_task_wait_seconds: 90
 driver_root: "/var/lib/gadget-msc-printer/drivers"
 local_api_host: "127.0.0.1"
 local_api_port: 8765
-health_url: "https://127.0.0.1/health"
+health_url: "https://127.0.0.1:8443/health"

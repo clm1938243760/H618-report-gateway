@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import json
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import Mock, patch
@@ -12,10 +15,9 @@ import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from jvlei_update.package import build_package, sha256_file, verify_package
+from jvlei_update.company_package import verify_company_package
+from jvlei_update.package import build_package, verify_package
 from jvlei_update.updater import ApplicationInstaller, StateStore, UpdaterConfig, UpdaterError, UpdaterService
-from update_center.run import install_signal_handlers
-from update_center.server import DASHBOARD_HTML, CenterStore
 
 
 def supports_directory_symlinks() -> bool:
@@ -32,53 +34,6 @@ def supports_directory_symlinks() -> bool:
 
 
 SUPPORTS_DIRECTORY_SYMLINKS = supports_directory_symlinks()
-
-
-class UpdateCenterRuntimeTests(unittest.TestCase):
-    def test_windows_event_loop_without_signal_handlers_is_supported(self) -> None:
-        class UnsupportedSignalLoop:
-            def add_signal_handler(self, sig, callback) -> None:
-                raise NotImplementedError
-
-        self.assertFalse(install_signal_handlers(UnsupportedSignalLoop(), Mock()))
-
-    def test_dashboard_assignment_buttons_do_not_generate_invalid_javascript(self) -> None:
-        self.assertNotIn("assign(''+x.agent_id", DASHBOARD_HTML)
-        self.assertIn('data-action="download"', DASHBOARD_HTML)
-        self.assertIn('data-action="install"', DASHBOARD_HTML)
-        self.assertIn("assign(this.dataset.agent,this.dataset.action)", DASHBOARD_HTML)
-
-
-def build_test_package(
-    path: Path,
-    product: str = "h618-report-gateway",
-    package_type: str = "application",
-) -> None:
-    payload = path.with_suffix(".payload.tar.gz")
-    with tarfile.open(payload, "w:gz") as archive:
-        content = b"application"
-        member = tarfile.TarInfo("README.txt")
-        member.size = len(content)
-        archive.addfile(member, io.BytesIO(content))
-    build_package(
-        payload,
-        {
-            "package_id": "h618-report-gateway-0.21.0-test",
-            "package_type": package_type,
-            "product": product,
-            "version": "0.21.0",
-            "arch": "all",
-            "compatible_versions": ["0.20.0"],
-            "created_at": "2026-08-06T00:00:00+00:00",
-            "release_notes": "test",
-            "git_commit": "0123456789abcdef",
-            "migration_level": 0,
-            "requires_gadget_restart": False,
-            "requires_cups_restart": False,
-        },
-        path,
-        allow_unsigned=True,
-    )
 
 
 def build_installable_application_package(path: Path, version: str = "0.21.0") -> None:
@@ -123,56 +78,119 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.package = self.root / "gateway.jvpkg"
-        build_test_package(self.package)
+        self.package = self.root / "gateway.zip"
+        self._build_company_package(self.package)
         self.downloads = 0
         self.reports: list[dict[str, object]] = []
-        self.assignment = {
-            "id": "assignment-1",
-            "action": "download",
-            "status": "queued",
-            "package": {
-                "id": "a" * 32,
-                "package_id": "h618-report-gateway-0.21.0-test",
-                "package_type": "application",
-                "version": "0.21.0",
-                "product": "h618-report-gateway",
-                "arch": "all",
-                "sha256": sha256_file(self.package),
-                "size_bytes": self.package.stat().st_size,
-                "signed": False,
-            },
-        }
+        self.check_requests: list[dict[str, object]] = []
+        self.terminal_requests: list[dict[str, object]] = []
+        self.auto_upgrade = False
+        self.has_update = True
         app = web.Application()
-        app.router.add_post("/v1/devices/check-in", self.check_in)
-        app.router.add_get("/v1/packages/{package_id}/download", self.download)
-        app.router.add_post("/v1/jobs/{assignment_id}/status", self.report)
+        app.router.add_post("/api/auto-update/report-terminal-info", self.report_terminal)
+        app.router.add_post("/api/auto-update/check", self.check_update)
+        app.router.add_get("/package.zip", self.download)
+        app.router.add_post("/api/auto-update/report", self.report)
+        app.router.add_post("/api/auto-update/rollback-report", self.report)
         self.server = TestServer(app)
         await self.server.start_server()
 
-        token_path = self.root / "device.token"
-        token_path.write_text("test-token\n", encoding="utf-8")
+        application = self.root / "application"
+        application.mkdir()
+        (application / "VERSION").write_text("0.21.2\n", encoding="ascii")
+        business_config = self.root / "gateway.yaml"
+        business_config.write_text("upload:\n  hospital_code: tejian01\n", encoding="utf-8")
         self.config_path = self.root / "updater.yaml"
         config_data = {
             "center_url": str(self.server.make_url("/")).rstrip("/"),
-            "agent_id": "h618-test-device",
-            "token_file": str(token_path),
-            "public_key_file": str(self.root / "missing.pem"),
+            "business_config_file": str(business_config),
             "allow_unsigned_packages": True,
             "state_dir": str(self.root / "state"),
-            "application_path": str(self.root / "application"),
+            "application_path": str(application),
             "release_root": str(self.root / "releases"),
+            "updater_release_root": str(self.root / "updater-releases"),
+            "updater_current_path": str(self.root / "updater-current"),
         }
         self.config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
         self.service = UpdaterService(self.config_path, UpdaterConfig.load(self.config_path))
+        self.service._network_identity = lambda: {  # type: ignore[method-assign]
+            "interface": "eth0",
+            "ip": "192.168.20.144",
+            "mac": "02:00:89:BD:16:D6",
+        }
 
     async def asyncTearDown(self) -> None:
         await self.server.close()
         self.temp.cleanup()
 
-    async def check_in(self, request: web.Request) -> web.Response:
-        self.assertEqual(request.headers.get("Authorization"), "Bearer test-token")
-        return web.json_response({"ok": True, "assignment": self.assignment})
+    @staticmethod
+    def _build_company_package(path: Path, *, product: str = "h618-report-gateway") -> None:
+        files = {
+            "pyproject.toml": b'[project]\nversion = "0.22.0"\n',
+            "src/gadget_msc_printer/__init__.py": b"",
+            "src/jvlei_update/__init__.py": b"",
+            "scripts/apply_gadget_mode.sh": b"#!/bin/sh\n",
+            "portal/portal/dist/index.html": b"<!doctype html>",
+        }
+        payload = path.with_suffix(".payload.tar.gz")
+        with tarfile.open(payload, "w:gz") as archive:
+            for name, content in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(content)
+                member.mode = 0o755 if name.endswith(".sh") else 0o644
+                archive.addfile(member, io.BytesIO(content))
+        payload_bytes = payload.read_bytes()
+        manifest = {
+            "schemaVersion": 1,
+            "packageType": "application",
+            "appCode": "linux",
+            "product": product,
+            "version": "v0.22.0",
+            "platform": "linux-arm64",
+            "architecture": "arm64",
+            "compatibleFrom": ["v0.21.2"],
+            "releaseNote": "test",
+            "payload": {
+                "path": "payload.tar.gz",
+                "format": "tar.gz",
+                "size": len(payload_bytes),
+                "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+                "fileCount": len(files),
+            },
+            "install": {
+                "mode": "atomic_release",
+                "requiresGadgetRestart": False,
+                "requiresCupsRestart": False,
+            },
+        }
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(manifest).encode())
+            archive.writestr("payload.tar.gz", payload_bytes)
+
+    async def report_terminal(self, request: web.Request) -> web.Response:
+        self.terminal_requests.append(await request.json())
+        return web.json_response({"code": 200, "success": True, "data": True, "msg": "ok"})
+
+    async def check_update(self, request: web.Request) -> web.Response:
+        self.check_requests.append(await request.json())
+        if not self.has_update:
+            return web.json_response(
+                {"code": 0, "success": True, "data": {"hasUpdate": False}, "msg": "ok"}
+            )
+        data = {
+            "hasUpdate": True,
+            "recordId": "2087387590501675010",
+            "newVersion": "v0.22.0",
+            "newVersionId": "2087373815128076290",
+            "packageFileId": "2087373815128076290",
+            "packageFileName": self.package.name,
+            "packageSize": self.package.stat().st_size,
+            "autoUpgrade": self.auto_upgrade,
+            "downloadUrl": str(self.server.make_url("/package.zip")),
+            "strategyId": "2087374148797542402",
+            "releaseNote": "test",
+        }
+        return web.json_response({"code": 200, "success": True, "data": data, "msg": "ok"})
 
     async def download(self, request: web.Request) -> web.Response:
         self.downloads += 1
@@ -180,48 +198,97 @@ class UpdaterServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def report(self, request: web.Request) -> web.Response:
         self.reports.append(await request.json())
-        return web.json_response({"ok": True})
+        return web.json_response({"code": 200, "success": True, "data": True, "msg": "ok"})
 
-    async def test_download_is_verified_and_not_downloaded_twice(self) -> None:
-        first = await self.service.check_once()
-        self.assertTrue(first["download"]["ready"])
-        self.assertEqual(first["download"]["assignment_id"], "assignment-1")
-        self.assertEqual(self.downloads, 1)
-        self.assertEqual(self.reports[-1]["status"], "downloaded")
-
-        await self.service.check_once()
-        self.assertEqual(self.downloads, 1)
-        self.assertEqual(self.reports[-1]["status"], "downloaded")
-
-    async def test_wrong_product_is_rejected_before_download(self) -> None:
-        self.assignment["package"]["product"] = "different-product"
-        with self.assertRaisesRegex(UpdaterError, "different product"):
-            await self.service.check_once()
+    async def test_manual_strategy_checks_without_downloading_and_omits_empty_fields(self) -> None:
+        status = await self.service.check_once()
+        self.assertEqual(status["update"]["version"], "v0.22.0")
+        self.assertIsNone(status["download"])
         self.assertEqual(self.downloads, 0)
+        request = self.check_requests[-1]
+        self.assertEqual(request["hospitalCode"], "tejian01")
+        self.assertEqual(request["terminalIp"], "192.168.20.144")
+        self.assertEqual(request["terminalMac"], "02:00:89:BD:16:D6")
+        self.assertEqual(request["currentVersion"], "v0.21.2")
+        self.assertNotIn("currentVersionId", request)
+        self.assertNotIn("hospitalId", request)
+        self.assertNotIn("hospitalAreaCode", request)
+        self.assertNotIn("deptCode", request)
 
-    async def test_unsigned_center_driver_is_never_installed(self) -> None:
-        build_test_package(self.package, package_type="printer_driver")
-        self.assignment["package"].update(
-            package_type="printer_driver",
-            package_id="h618-report-gateway-0.21.0-test",
-            sha256=sha256_file(self.package),
-            size_bytes=self.package.stat().st_size,
-        )
+    async def test_manual_download_verifies_company_zip_and_reports_statuses(self) -> None:
         await self.service.check_once()
-        with self.assertRaisesRegex(UpdaterError, "must be signed"):
-            await self.service.install_downloaded()
-        self.assertEqual(self.reports[-1]["status"], "failed")
+        status = await self.service.download_update()
+        self.assertTrue(status["download"]["ready"])
+        self.assertEqual(self.downloads, 1)
+        self.assertEqual([item["upgradeStatus"] for item in self.reports], [1, 2])
+        info = verify_company_package(Path(status["download"]["path"]), expected_version="v0.22.0")
+        info.cleanup()
 
-    async def test_local_confirm_install_reports_original_assignment(self) -> None:
-        await self.service.check_once()
+    async def test_auto_upgrade_downloads_installs_and_accepts_string_ids(self) -> None:
+        self.auto_upgrade = True
         with patch.object(
             self.service.installer,
             "install",
-            return_value={"version": "0.21.0", "previous_version": "0.20.0"},
-        ):
-            status = await self.service.install_downloaded()
+            return_value={"version": "0.22.0", "previous_version": "0.21.2"},
+        ), patch.object(self.service, "_schedule_agent_restart"):
+            status = await self.service.check_once()
         self.assertIsNone(status["download"])
-        self.assertEqual(self.reports[-1]["status"], "installed")
+        self.assertIsNone(status["update"])
+        self.assertEqual(status["current_version_id"], "2087373815128076290")
+        self.assertEqual([item["upgradeStatus"] for item in self.reports], [1, 2, 3, 4])
+
+    async def test_business_code_zero_is_also_accepted(self) -> None:
+        # Exercise the parser directly because aiohttp routers cannot be replaced after startup.
+        with patch.object(self.service, "_request_json", return_value={"code": 0, "success": True, "data": None}):
+            result = await self.service._check_company(report_terminal=False)  # noqa: SLF001
+        self.assertIsNone(result)
+
+    async def test_no_update_clears_stale_download(self) -> None:
+        state = self.service.state_store.read()
+        state["download"] = {"ready": True, "path": "stale.zip"}
+        self.service.state_store.write(state)
+        self.has_update = False
+        status = await self.service.check_once()
+        self.assertIsNone(status["update"])
+        self.assertIsNone(status["download"])
+
+    async def test_startup_reconciles_active_release_with_legacy_state(self) -> None:
+        legacy_release = self.root / "releases" / "0.21.1"
+        legacy_release.mkdir(parents=True)
+        (legacy_release / "VERSION").write_text("0.21.1\n", encoding="ascii")
+        state = self.service.state_store.read()
+        state.update(current_release=str(legacy_release), current_version="0.21.1")
+        self.service.state_store.write(state)
+        refreshed = UpdaterService(self.config_path, UpdaterConfig.load(self.config_path))
+        value = refreshed.state_store.read()
+        self.assertEqual(value["current_version"], "0.21.2")
+        self.assertEqual(value["previous_version"], "0.21.1")
+
+    async def test_expired_download_url_is_refreshed_once(self) -> None:
+        await self.service.check_once()
+        original_download = self.service._download_to  # noqa: SLF001
+        attempts = 0
+
+        async def fail_once(url: str, partial: Path, expected_size: int) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise UpdaterError("temporary link expired")
+            await original_download(url, partial, expected_size)
+
+        with patch.object(self.service, "_download_to", side_effect=fail_once):
+            status = await self.service.download_update()
+        self.assertTrue(status["download"]["ready"])
+        self.assertEqual(attempts, 2)
+        self.assertEqual(len(self.check_requests), 2)
+
+    async def test_failed_status_report_is_queued_and_later_flushed(self) -> None:
+        await self.service.check_once()
+        with patch.object(self.service, "_request_json", side_effect=UpdaterError("offline")):
+            await self.service._report_upgrade(1, "download")  # noqa: SLF001
+        self.assertEqual(self.service.status()["pending_reports"], 1)
+        await self.service._flush_reports()  # noqa: SLF001
+        self.assertEqual(self.service.status()["pending_reports"], 0)
 
 
 class ApplicationReleasePreparationTests(unittest.TestCase):
@@ -316,6 +383,9 @@ class ApplicationInstallerFailureRecoveryTests(unittest.TestCase):
             application = root / "application"
             application.mkdir()
             (application / "VERSION").write_text("0.20.0\n", encoding="ascii")
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "config.yaml").write_text("mode: msc\n", encoding="utf-8")
             package_path = root / "gateway.jvpkg"
             build_installable_application_package(package_path)
             work_root = root / "work"
@@ -335,6 +405,7 @@ class ApplicationInstallerFailureRecoveryTests(unittest.TestCase):
                 release_root=str(root / "releases"),
                 updater_release_root=str(root / "updater-releases"),
                 updater_current_path=str(root / "updater-current"),
+                config_dir=str(config_dir),
                 active_task_wait_seconds=0,
             )
             installer = ApplicationInstaller(
@@ -362,10 +433,14 @@ class ApplicationInstallerTests(unittest.TestCase):
         self.application = self.root / "application"
         self.application.mkdir()
         (self.application / "VERSION").write_text("0.20.0\n", encoding="ascii")
+        self.config_dir = self.root / "config"
+        self.config_dir.mkdir()
+        (self.config_dir / "config.yaml").write_text("mode: msc\n", encoding="utf-8")
         self.config = UpdaterConfig(
             state_dir=str(self.root / "state"),
             application_path=str(self.application),
             release_root=str(self.root / "releases"),
+            config_dir=str(self.config_dir),
             health_url="https://127.0.0.1/health",
         )
         self.commands: list[list[str]] = []
@@ -425,45 +500,3 @@ class ApplicationInstallerTests(unittest.TestCase):
         self.assertFalse(self.application.is_symlink())
         self.assertEqual((self.application / "VERSION").read_text(encoding="ascii").strip(), "0.20.0")
         self.assertFalse((self.root / "releases" / "0.21.0").exists())
-
-
-class UpdateCenterStoreTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        self.package = self.root / "gateway.jvpkg"
-        build_test_package(self.package)
-        self.store = CenterStore(self.root / "center.sqlite3")
-
-    def tearDown(self) -> None:
-        self.temp.cleanup()
-
-    def test_downloaded_assignment_is_not_offered_again(self) -> None:
-        self.assertTrue(self.store.consume_pair_code(self.store.create_pair_code(30, "test")))
-        agent_id, _ = self.store.pair_device({"hostname": "test", "product": "h618-report-gateway"})
-        package = self.store.add_package(
-            {
-                "package_id": "h618-report-gateway-0.21.0-test",
-                "package_type": "application",
-                "version": "0.21.0",
-                "product": "h618-report-gateway",
-                "arch": "all",
-                "created_at": "2026-08-06T00:00:00+00:00",
-                "release_notes": "test",
-                "git_commit": "0123456789abcdef",
-                "migration_level": 0,
-                "requires_gadget_restart": False,
-                "requires_cups_restart": False,
-            },
-            self.package,
-            signed=False,
-            packages_dir=self.root / "packages",
-        )
-        assignment = self.store.assign(agent_id, package["id"], "download")
-        self.assertIsNotNone(self.store.pending_assignment(agent_id))
-        self.store.update_assignment(assignment["id"], "downloaded", {"package_id": package["id"]})
-        self.assertIsNone(self.store.pending_assignment(agent_id))
-        self.store.set_device_group(agent_id, "测试医院")
-        self.assertEqual(self.store.groups(), [{"group_name": "测试医院", "device_count": 1}])
-        group_assignments = self.store.assign_group("测试医院", package["id"], "download")
-        self.assertEqual(len(group_assignments), 1)

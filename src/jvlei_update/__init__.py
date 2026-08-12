@@ -1,5 +1,6 @@
-"""JVLEI signed update package and board updater support."""
+"""JVLEI company update package and board updater support."""
 
-from .package import PackageError, PackageInfo, build_package, verify_package
+from .company_package import verify_company_package
+from .package import PackageError, PackageInfo, safe_extract_payload
 
-__all__ = ["PackageError", "PackageInfo", "build_package", "verify_package"]
+__all__ = ["PackageError", "PackageInfo", "safe_extract_payload", "verify_company_package"]

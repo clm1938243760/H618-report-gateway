@@ -5,12 +5,12 @@ import json
 import logging
 import os
 import platform
-import random
 import shutil
 import socket
 import sqlite3
 import ssl
 import subprocess
+import tarfile
 import tempfile
 import time
 import urllib.request
@@ -18,17 +18,17 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import aiohttp
 import yaml
 
-from gadget_msc_printer.driver_manager import DriverError, DriverManager
-
-from .package import PackageError, PackageInfo, safe_extract_payload, sha256_file, verify_package
+from .company_package import server_version, verify_company_package
+from .package import MAX_MANIFEST_BYTES, MAX_PAYLOAD_BYTES, PackageInfo, safe_extract_payload, sha256_file
 
 
 LOGGER = logging.getLogger(__name__)
-INSTALL_POLICIES = frozenset({"local_confirm", "remote_allowed"})
+MAX_COMPANY_PACKAGE_BYTES = MAX_PAYLOAD_BYTES + MAX_MANIFEST_BYTES + 16 * 1024 * 1024
 
 
 class UpdaterError(RuntimeError):
@@ -38,15 +38,14 @@ class UpdaterError(RuntimeError):
 @dataclass
 class UpdaterConfig:
     enabled: bool = True
-    center_url: str = "https://update.jvlei.com"
+    center_url: str = "http://192.168.112.229:28080"
+    app_code: str = "linux"
+    platform: str = "linux-arm64"
     product: str = "h618-report-gateway"
-    agent_id: str = ""
-    token_file: str = "/etc/jvlei-updater/device.token"
-    public_key_file: str = "/etc/jvlei-updater/update-public.pem"
-    check_interval_seconds: int = 60
-    max_backoff_seconds: int = 1800
-    install_policy: str = "local_confirm"
-    allow_unsigned_packages: bool = False
+    business_config_file: str = "/etc/gadget-msc-printer/config.yaml"
+    config_dir: str = "/etc/gadget-msc-printer"
+    boot_check: bool = True
+    allow_unsigned_packages: bool = True
     keep_previous_versions: int = 1
     state_dir: str = "/var/lib/jvlei-updater"
     application_path: str = "/opt/gadget-msc-printer"
@@ -58,7 +57,7 @@ class UpdaterConfig:
     driver_root: str = "/var/lib/gadget-msc-printer/drivers"
     local_api_host: str = "127.0.0.1"
     local_api_port: int = 8765
-    health_url: str = "https://127.0.0.1/health"
+    health_url: str = "https://127.0.0.1:8443/health"
 
     @classmethod
     def load(cls, path: str | Path) -> "UpdaterConfig":
@@ -76,12 +75,20 @@ class UpdaterConfig:
     def validate(self) -> None:
         if not self.center_url.startswith(("http://", "https://")):
             raise UpdaterError("center_url must be an HTTP or HTTPS URL")
-        if self.install_policy not in INSTALL_POLICIES:
-            raise UpdaterError("install_policy must be local_confirm or remote_allowed")
-        if not 15 <= int(self.check_interval_seconds) <= 86400:
-            raise UpdaterError("check_interval_seconds must be between 15 and 86400")
-        if not int(self.check_interval_seconds) <= int(self.max_backoff_seconds) <= 86400:
-            raise UpdaterError("max_backoff_seconds is invalid")
+        parsed = urlparse(self.center_url)
+        if (
+            not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise UpdaterError("center_url must be an HTTP(S) origin without credentials, query, or fragment")
+        for field_name in ("app_code", "platform", "product"):
+            value = str(getattr(self, field_name)).strip()
+            if not value or len(value) > 128:
+                raise UpdaterError(f"{field_name} is invalid")
         if int(self.keep_previous_versions) != 1:
             raise UpdaterError("keep_previous_versions must be 1 in this release")
         if not 0 <= int(self.active_task_wait_seconds) <= 600:
@@ -137,6 +144,8 @@ class ApplicationInstaller:
         self.state_store = state_store
         self.command_runner = command_runner or self._default_runner
         self.prepare_runtime = prepare_runtime
+        self.last_rollback_attempted = False
+        self.last_rollback_succeeded = False
 
     @staticmethod
     def _default_runner(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
@@ -214,7 +223,12 @@ class ApplicationInstaller:
             )
         staging = release_root / f".{version}.staging-{uuid.uuid4().hex}"
         try:
-            safe_extract_payload(package.payload_path, staging)
+            extracted = safe_extract_payload(package.payload_path, staging)
+            expected_files = package.manifest.get("payload_file_count")
+            if expected_files is not None and len(extracted) != int(expected_files):
+                raise UpdaterError(
+                    f"payload file count mismatch: expected {expected_files}, extracted {len(extracted)}"
+                )
             for required in ("pyproject.toml", "src", "scripts", "portal/portal/dist/index.html"):
                 if not (staging / required).exists():
                     raise UpdaterError(f"application payload is missing {required}")
@@ -259,6 +273,24 @@ class ApplicationInstaller:
             time.sleep(2)
         LOGGER.warning("active report upload did not complete before update timeout")
 
+    def _backup_configuration(self, version: str) -> Path:
+        source = Path(self.config.config_dir)
+        if not source.is_dir():
+            raise UpdaterError(f"configuration directory is missing: {source}")
+        backup_root = Path(self.config.state_dir) / "backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        destination = backup_root / f"config-before-{version}-{int(time.time())}.tar.gz"
+        temporary = destination.with_suffix(destination.suffix + ".part")
+        try:
+            with tarfile.open(temporary, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+                archive.add(source, arcname=source.name, recursive=True)
+            os.replace(temporary, destination)
+            os.chmod(destination, 0o600)
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            raise UpdaterError(f"cannot back up configuration: {exc}") from exc
+        return destination
+
     def _start_services(self, manifest: dict[str, Any]) -> None:
         self._run(["systemctl", "daemon-reload"], timeout=30)
         if manifest.get("requires_cups_restart"):
@@ -300,35 +332,66 @@ class ApplicationInstaller:
         raise UpdaterError(f"application path is missing: {app}")
 
     def install(self, package: PackageInfo) -> dict[str, Any]:
+        self.last_rollback_attempted = False
+        self.last_rollback_succeeded = False
         if package.manifest["package_type"] != "application":
             raise UpdaterError("application installer only accepts application packages")
+        manifest_health_url = str(package.manifest.get("health_url", "")).strip()
+        if manifest_health_url and manifest_health_url != self.config.health_url:
+            raise UpdaterError("package health URL does not match the fixed device health endpoint")
         target_arch = platform.machine().lower()
         package_arch = str(package.manifest["arch"]).lower()
         if package_arch not in {"all", target_arch, "arm64" if target_arch == "aarch64" else target_arch}:
             raise UpdaterError(f"package architecture {package_arch} does not match {target_arch}")
-        new_release = self._prepare_release(package)
         app = Path(self.config.application_path)
         previous, previous_was_directory = self._current_target()
         previous_version = self.current_version(previous)
+        version = str(package.manifest["version"])
+        if version == previous_version:
+            raise UpdaterError(f"version {version} is already installed")
         compatible_versions = package.manifest.get("compatible_versions", [])
         if previous_version not in compatible_versions and "*" not in compatible_versions:
-            shutil.rmtree(new_release, ignore_errors=True)
             raise UpdaterError(
                 f"package {package.manifest['version']} is not compatible with current version {previous_version}"
             )
-        version = str(package.manifest["version"])
-        try:
-            new_updater_release = self._prepare_updater_release(new_release, version)
-        except Exception:
-            shutil.rmtree(new_release, ignore_errors=True)
-            raise
         updater_current = Path(self.config.updater_current_path)
         previous_updater_release = updater_current.resolve() if updater_current.is_symlink() else None
+        release_path = Path(self.config.release_root) / version
+        updater_release_path = Path(self.config.updater_release_root) / version
+        replaced_release: Path | None = None
+        replaced_updater_release: Path | None = None
+
+        def park_existing(path: Path) -> Path | None:
+            if not path.exists():
+                return None
+            parked = path.with_name(f".{path.name}.replaced-{uuid.uuid4().hex}")
+            os.replace(path, parked)
+            return parked
+
+        def restore_parked(path: Path, parked: Path | None) -> None:
+            if parked is None or not parked.exists():
+                return
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+            os.replace(parked, path)
+
+        try:
+            replaced_release = park_existing(release_path)
+            replaced_updater_release = park_existing(updater_release_path)
+            new_release = self._prepare_release(package)
+            new_updater_release = self._prepare_updater_release(new_release, version)
+        except Exception:
+            shutil.rmtree(release_path, ignore_errors=True)
+            shutil.rmtree(updater_release_path, ignore_errors=True)
+            restore_parked(release_path, replaced_release)
+            restore_parked(updater_release_path, replaced_updater_release)
+            raise
         imported_previous = previous
         switched = False
         updater_switched = False
         try:
             self._wait_for_active_reports()
+            configuration_backup = self._backup_configuration(version)
             self._stop_services()
             if previous_was_directory:
                 imported_previous = Path(self.config.release_root) / previous_version
@@ -354,18 +417,26 @@ class ApplicationInstaller:
                 except Exception:
                     LOGGER.exception("automatic updater-agent rollback failed")
             if switched:
+                self.last_rollback_attempted = True
                 try:
                     app.unlink(missing_ok=True)
                     if previous_was_directory:
                         os.replace(imported_previous, app)
                     else:
                         self._atomic_symlink(imported_previous, app)
+                    self.last_rollback_succeeded = True
                 except Exception:
                     LOGGER.exception("automatic application rollback failed")
             self._restart_services_after_failure()
             shutil.rmtree(new_release, ignore_errors=True)
             shutil.rmtree(new_updater_release, ignore_errors=True)
+            restore_parked(release_path, replaced_release)
+            restore_parked(updater_release_path, replaced_updater_release)
             raise
+        if replaced_release is not None:
+            shutil.rmtree(replaced_release, ignore_errors=True)
+        if replaced_updater_release is not None:
+            shutil.rmtree(replaced_updater_release, ignore_errors=True)
         state = self.state_store.read()
         state.update(
             current_version=version,
@@ -375,6 +446,7 @@ class ApplicationInstaller:
             current_updater_release=str(new_updater_release),
             previous_updater_release=str(previous_updater_release or ""),
             installed_at=int(time.time()),
+            configuration_backup=str(configuration_backup),
         )
         self.state_store.write(state)
         self._prune_releases({new_release.resolve(), imported_previous.resolve()})
@@ -461,54 +533,6 @@ class ApplicationInstaller:
                 shutil.rmtree(candidate, ignore_errors=True)
 
 
-class DriverPackageInstaller:
-    """Installs a centrally published, already-signed printer driver package."""
-
-    SOURCE_SUFFIXES = (".deb", ".ppd", ".ppd.gz", ".zip", ".tar", ".tgz", ".tar.gz")
-
-    def __init__(self, config: UpdaterConfig) -> None:
-        self.config = config
-
-    def install(self, package: PackageInfo) -> dict[str, Any]:
-        if package.manifest["package_type"] != "printer_driver":
-            raise UpdaterError("driver installer only accepts printer driver packages")
-        if not package.signed:
-            raise UpdaterError("centrally published printer drivers must be signed")
-        package_id = str(package.manifest["package_id"])
-        root = Path(self.config.state_dir) / "driver-package-staging"
-        staging = root / f"{package_id}-{uuid.uuid4().hex}"
-        try:
-            safe_extract_payload(package.payload_path, staging)
-            candidates = [
-                path
-                for path in staging.rglob("*")
-                if path.is_file() and path.name.lower().endswith(self.SOURCE_SUFFIXES)
-            ]
-            if len(candidates) != 1:
-                raise UpdaterError("printer driver package must contain exactly one supported driver source file")
-            source = candidates[0]
-            manager = DriverManager(root=self.config.driver_root)
-            staged = manager.stage_upload(source.name, source)
-            analysis = staged.get("analysis") or {}
-            if not analysis.get("supported"):
-                reasons = "; ".join(str(value) for value in analysis.get("reasons", []))
-                raise UpdaterError(f"signed printer driver did not pass compatibility analysis: {reasons or 'unknown reason'}")
-            if analysis.get("maintainer_scripts"):
-                raise UpdaterError(
-                    "centrally published DEB driver contains maintainer scripts; install it from the local driver page after review"
-                )
-            result = manager.install(str(staged["id"]), confirm_scripts=False)
-            return {
-                "driver": result["driver"],
-                "backup": result["backup"],
-                "package_id": package_id,
-            }
-        except DriverError as exc:
-            raise UpdaterError(f"printer driver installation failed: {exc}") from exc
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-
-
 class UpdaterService:
     def __init__(self, config_path: str | Path, config: UpdaterConfig) -> None:
         self.config_path = Path(config_path)
@@ -518,81 +542,180 @@ class UpdaterService:
         self.packages_dir = state_dir / "packages"
         self.packages_dir.mkdir(parents=True, exist_ok=True)
         self.state_store = StateStore(state_dir / "state.json")
+        state = self.state_store.read()
+        if state.get("installing"):
+            state.update(
+                installing=False,
+                operation="",
+                last_error=str(state.get("last_error") or "previous update operation was interrupted"),
+            )
         self.installer = ApplicationInstaller(config, self.state_store)
-        self.driver_installer = DriverPackageInstaller(config)
+        self._reconcile_release_state(state)
         self.operation_lock = asyncio.Lock()
-        self.wake_event = asyncio.Event()
         self.stop_event = asyncio.Event()
+        self.background_operation: asyncio.Task[None] | None = None
 
-    def _token(self) -> str:
-        try:
-            return Path(self.config.token_file).read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
+    def _reconcile_release_state(self, state: dict[str, Any]) -> None:
+        application = Path(self.config.application_path)
+        if not application.exists():
+            self.state_store.write(state)
+            return
+        active_release = application.resolve()
+        active_version = self.installer.current_version(active_release)
+        recorded_release = Path(str(state.get("current_release", "")))
+        recorded_version = str(state.get("current_version", ""))
+        release_changed = recorded_release != active_release or recorded_version != active_version
+        if release_changed and recorded_release.is_dir() and recorded_release.resolve() != active_release:
+            state.update(
+                previous_release=str(recorded_release.resolve()),
+                previous_version=self.installer.current_version(recorded_release.resolve()),
+            )
+        state.update(current_release=str(active_release), current_version=active_version)
+
+        updater_link = Path(self.config.updater_current_path)
+        if updater_link.is_symlink():
+            active_updater = updater_link.resolve()
+            recorded_updater = Path(str(state.get("current_updater_release", "")))
+            if recorded_updater != active_updater:
+                if recorded_updater.is_dir():
+                    state["previous_updater_release"] = str(recorded_updater.resolve())
+            state["current_updater_release"] = str(active_updater)
+        self.state_store.write(state)
 
     def _current_version(self) -> str:
-        state = self.state_store.read()
-        if state.get("current_version"):
-            return str(state["current_version"])
         app = Path(self.config.application_path)
         return self.installer.current_version(app.resolve() if app.exists() else app)
 
+    @staticmethod
+    def _integer(value: object, field: str, *, optional: bool = False) -> int | None:
+        if optional and value in (None, ""):
+            return None
+        try:
+            result = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise UpdaterError(f"company response field {field} must be an integer") from exc
+        if result < 0:
+            raise UpdaterError(f"company response field {field} must not be negative")
+        return result
+
+    def _network_identity(self) -> dict[str, str]:
+        parsed = urlparse(self.config.center_url)
+        host = parsed.hostname or ""
+        try:
+            destination = socket.gethostbyname(host)
+            result = subprocess.run(
+                ["ip", "-j", "route", "get", destination],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            routes = json.loads(result.stdout) if result.returncode == 0 else []
+            route = routes[0] if isinstance(routes, list) and routes else {}
+            device = str(route.get("dev", "")).strip()
+            address = str(route.get("prefsrc", route.get("src", ""))).strip()
+            mac_path = Path("/sys/class/net") / device / "address"
+            mac = mac_path.read_text(encoding="ascii").strip().upper() if mac_path.is_file() else ""
+            if address:
+                return {"interface": device, "ip": address, "mac": mac}
+        except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+                connection.connect((host, port))
+                address = str(connection.getsockname()[0])
+            return {"interface": "", "ip": address, "mac": ""}
+        except OSError as exc:
+            raise UpdaterError(f"cannot determine network identity for update center: {exc}") from exc
+
+    def _hospital_code(self) -> str:
+        try:
+            data = yaml.safe_load(Path(self.config.business_config_file).read_text(encoding="utf-8")) or {}
+            upload = data.get("upload") if isinstance(data, dict) else None
+            return str(upload.get("hospital_code", "")).strip() if isinstance(upload, dict) else ""
+        except (OSError, yaml.YAMLError):
+            return ""
+
+    def _terminal_payload(self) -> dict[str, Any]:
+        identity = self._network_identity()
+        payload: dict[str, Any] = {
+            "appCode": self.config.app_code,
+            "terminalIp": identity["ip"],
+            "terminalName": socket.gethostname(),
+        }
+        if identity["mac"]:
+            payload["terminalMac"] = identity["mac"]
+        hospital_code = self._hospital_code()
+        if hospital_code:
+            payload["hospitalCode"] = hospital_code
+        return payload
+
+    def _check_payload(self) -> dict[str, Any]:
+        payload = self._terminal_payload()
+        payload.update(
+            currentVersion=server_version(self._current_version()),
+            platform=self.config.platform,
+            osVersion=f"{platform.system()} {platform.release()} {platform.machine()}",
+        )
+        version_id = self.state_store.read().get("current_version_id")
+        if version_id not in (None, "", 0, "0"):
+            payload["currentVersionId"] = int(version_id)
+        return payload
+
+    async def _request_json(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        url = f"{self.config.center_url.rstrip('/')}{path}"
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, sock_connect=10)) as session:
+                async with session.request(method, url, json=body) as response:
+                    try:
+                        payload = await response.json(content_type=None)
+                    except (ValueError, aiohttp.ClientError) as exc:
+                        detail = await response.text()
+                        raise UpdaterError(detail or f"company API returned invalid JSON: {exc}") from exc
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise UpdaterError(f"company API unavailable: {exc}") from exc
+        if response.status not in {200, 201}:
+            raise UpdaterError(str(payload.get("msg") or f"company API failed: HTTP {response.status}"))
+        code = self._integer(payload.get("code"), "code")
+        if payload.get("success") is not True or code not in {0, 200}:
+            raise UpdaterError(str(payload.get("msg") or f"company API rejected request: code={code}"))
+        return payload
+
     def status(self) -> dict[str, Any]:
         state = self.state_store.read()
-        assignment = state.get("assignment") if isinstance(state.get("assignment"), dict) else None
+        try:
+            identity = self._network_identity()
+        except UpdaterError:
+            identity = {"interface": "", "ip": "", "mac": ""}
+        update = state.get("update")
+        if isinstance(update, dict):
+            update = dict(update)
+            for field in ("record_id", "strategy_id", "version_id", "package_id"):
+                if update.get(field) is not None:
+                    update[field] = str(update[field])
+        current_version_id = state.get("current_version_id")
         return {
             "ok": True,
             "enabled": self.config.enabled,
-            "paired": bool(self.config.agent_id and self._token()),
-            "agent_id": self.config.agent_id,
             "center_url": self.config.center_url,
-            "install_policy": self.config.install_policy,
+            "app_code": self.config.app_code,
+            "platform": self.config.platform,
             "allow_unsigned_packages": self.config.allow_unsigned_packages,
-            "current_version": self._current_version(),
-            "assignment": assignment,
+            "current_version": server_version(self._current_version()),
+            # Company IDs are int64 and exceed JavaScript's safe integer range.
+            "current_version_id": str(current_version_id) if current_version_id is not None else None,
+            "update": update,
+            "download": state.get("download"),
+            "network": identity,
             "last_check_at": state.get("last_check_at"),
             "last_success_at": state.get("last_success_at"),
             "last_error": state.get("last_error", ""),
-            "download": state.get("download"),
             "previous_version": state.get("previous_version", ""),
+            "pending_reports": len(state.get("pending_reports", [])),
+            "installing": bool(state.get("installing")),
+            "operation": str(state.get("operation", "")),
         }
-
-    def _device_payload(self) -> dict[str, Any]:
-        usage = shutil.disk_usage(self.config.state_dir)
-        return {
-            "agent_id": self.config.agent_id,
-            "hostname": socket.gethostname(),
-            "product": self.config.product,
-            "version": self._current_version(),
-            "arch": platform.machine().lower(),
-            "install_policy": self.config.install_policy,
-            "free_bytes": usage.free,
-            "total_bytes": usage.total,
-        }
-
-    async def pair(self, code: str) -> dict[str, Any]:
-        if not code.strip():
-            raise UpdaterError("pairing code is required")
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{self.config.center_url.rstrip('/')}/v1/devices/pair",
-                json={**self._device_payload(), "pairing_code": code.strip()},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                payload = await response.json(content_type=None)
-                if response.status != 200 or not payload.get("ok"):
-                    raise UpdaterError(str(payload.get("error") or f"pairing failed: HTTP {response.status}"))
-        agent_id = str(payload.get("agent_id", "")).strip()
-        token = str(payload.get("token", "")).strip()
-        if not agent_id or not token:
-            raise UpdaterError("pairing response did not contain device credentials")
-        token_path = Path(self.config.token_file)
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(token + "\n", encoding="utf-8")
-        os.chmod(token_path, 0o600)
-        self.config.agent_id = agent_id
-        self._save_config()
-        return self.status()
 
     def _save_config(self) -> None:
         data = asdict(self.config)
@@ -602,238 +725,452 @@ class UpdaterService:
         os.chmod(temporary, 0o640)
         os.replace(temporary, self.config_path)
 
-    async def check_once(self) -> dict[str, Any]:
-        token = self._token()
-        if not self.config.agent_id or not token:
-            raise UpdaterError("device is not paired")
+    def set_center_url(self, center_url: str) -> dict[str, Any]:
+        previous = self.config.center_url
+        self.config.center_url = center_url.strip().rstrip("/")
+        try:
+            self.config.validate()
+            self._save_config()
+        except Exception:
+            self.config.center_url = previous
+            raise
+        return self.status()
+
+    async def _flush_reports(self) -> None:
+        state = self.state_store.read()
+        pending = state.get("pending_reports")
+        if not isinstance(pending, list) or not pending:
+            return
+        remaining: list[dict[str, Any]] = []
+        for index, item in enumerate(pending):
+            if not isinstance(item, dict):
+                continue
+            try:
+                await self._request_json("POST", str(item["path"]), dict(item["body"]))
+            except Exception:
+                remaining.extend(value for value in pending[index:] if isinstance(value, dict))
+                break
+        state = self.state_store.read()
+        state["pending_reports"] = remaining
+        self.state_store.write(state)
+
+    async def _queue_report(self, path: str, body: dict[str, Any]) -> None:
+        state = self.state_store.read()
+        pending = state.get("pending_reports")
+        if not isinstance(pending, list):
+            pending = []
+        pending.append({"path": path, "body": body, "queued_at": int(time.time())})
+        state["pending_reports"] = pending[-100:]
+        self.state_store.write(state)
+        try:
+            await self._flush_reports()
+        except Exception:
+            LOGGER.exception("failed to flush company update reports")
+
+    async def _report_upgrade(
+        self,
+        status: int,
+        result: str,
+        *,
+        error: str = "",
+        current_version: str = "",
+        current_version_id: int | None = None,
+    ) -> None:
+        update = self.state_store.read().get("update")
+        if not isinstance(update, dict) or not update.get("record_id"):
+            return
+        body: dict[str, Any] = {
+            "recordId": int(update["record_id"]),
+            "upgradeStatus": status,
+            "upgradeResult": result[:2000],
+        }
+        if error:
+            body["errorMessage"] = error[:2000]
+        if current_version:
+            body["currentVersion"] = server_version(current_version)
+        if current_version_id is not None:
+            body["currentVersionId"] = int(current_version_id)
+        await self._queue_report("/api/auto-update/report", body)
+
+    async def _report_rollback(
+        self,
+        status: int,
+        result: str,
+        *,
+        error: str = "",
+        current_version: str = "",
+        current_version_id: int | None = None,
+    ) -> None:
+        update = self.state_store.read().get("update")
+        if not isinstance(update, dict) or not update.get("record_id"):
+            return
+        body: dict[str, Any] = {
+            "recordId": int(update["record_id"]),
+            "rollbackStatus": status,
+            "rollbackResult": result[:2000],
+        }
+        if error:
+            body["errorMessage"] = error[:2000]
+        if current_version:
+            body["currentVersion"] = server_version(current_version)
+        if current_version_id is not None:
+            body["currentVersionId"] = int(current_version_id)
+        await self._queue_report("/api/auto-update/rollback-report", body)
+
+    async def _check_company(self, *, report_terminal: bool = True) -> dict[str, Any] | None:
+        if report_terminal:
+            await self._request_json("POST", "/api/auto-update/report-terminal-info", self._terminal_payload())
+        response = await self._request_json("POST", "/api/auto-update/check", self._check_payload())
+        data = response.get("data")
+        if not isinstance(data, dict) or data.get("hasUpdate") is not True:
+            return None
+        required = ("recordId", "newVersion", "newVersionId", "packageFileId", "packageFileName", "packageSize")
+        missing = [field for field in required if data.get(field) in (None, "")]
+        if missing:
+            raise UpdaterError("company update response missing: " + ", ".join(missing))
+        filename = Path(str(data["packageFileName"])).name
+        if filename != str(data["packageFileName"]) or not filename.lower().endswith(".zip"):
+            raise UpdaterError("company update package filename is invalid")
+        package_size = self._integer(data["packageSize"], "packageSize")
+        if package_size is None or not 1 <= package_size <= MAX_COMPANY_PACKAGE_BYTES:
+            raise UpdaterError("company update package size is outside the allowed range")
+        download_url = str(data.get("downloadUrl", "")).strip()
+        if download_url:
+            parsed_url = urlparse(download_url)
+            if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+                raise UpdaterError("company update download URL must use HTTP or HTTPS")
+            if parsed_url.username or parsed_url.password:
+                raise UpdaterError("company update download URL must not contain credentials")
+        return {
+            "record_id": self._integer(data["recordId"], "recordId"),
+            "strategy_id": self._integer(data.get("strategyId"), "strategyId", optional=True),
+            "version": server_version(data["newVersion"]),
+            "version_id": self._integer(data["newVersionId"], "newVersionId"),
+            "package_id": self._integer(data["packageFileId"], "packageFileId"),
+            "package_name": filename,
+            "package_size": package_size,
+            "download_url": download_url,
+            "auto_upgrade": data.get("autoUpgrade") is True,
+            "release_note": str(data.get("releaseNote", "")),
+            "release_time": str(data.get("releaseTime", "")),
+        }
+
+    async def check_once(self, *, auto_execute: bool = True) -> dict[str, Any]:
+        await self._flush_reports()
         state = self.state_store.read()
         state["last_check_at"] = int(time.time())
         self.state_store.write(state)
-        headers = {"Authorization": f"Bearer {token}"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.post(
-                f"{self.config.center_url.rstrip('/')}/v1/devices/check-in",
-                json=self._device_payload(),
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                payload = await response.json(content_type=None)
-                if response.status != 200 or not payload.get("ok"):
-                    raise UpdaterError(str(payload.get("error") or f"check-in failed: HTTP {response.status}"))
+        try:
+            update = await self._check_company()
+        except Exception as exc:
+            state = self.state_store.read()
+            state["last_error"] = str(exc)
+            self.state_store.write(state)
+            raise
         state = self.state_store.read()
-        state.update(last_success_at=int(time.time()), last_error="", assignment=payload.get("assignment"))
+        previous_update = state.get("update")
+        previous_version = previous_update.get("version") if isinstance(previous_update, dict) else None
+        state.update(last_success_at=int(time.time()), last_error="", update=update)
+        if update is None or update.get("version") != previous_version:
+            state["download"] = None
         self.state_store.write(state)
-        assignment = payload.get("assignment")
-        if isinstance(assignment, dict) and assignment.get("action") in {"download", "install"}:
-            await self.download_assignment(assignment)
-            if assignment.get("action") == "install" and self.config.install_policy == "remote_allowed":
-                await self.install_downloaded()
+        if auto_execute and update and update["auto_upgrade"]:
+            await self.download_update()
+            await self.install_downloaded()
         return self.status()
 
-    async def download_assignment(self, assignment: dict[str, Any] | None = None) -> dict[str, Any]:
-        async with self.operation_lock:
-            state = self.state_store.read()
-            selected = assignment or state.get("assignment")
-            if not isinstance(selected, dict):
-                raise UpdaterError("no update assignment is available")
-            package = selected.get("package")
-            if not isinstance(package, dict) or not package.get("id"):
-                raise UpdaterError("assignment does not contain a package")
-            if package.get("package_type") not in {"application", "printer_driver"}:
-                raise UpdaterError("assigned package type is not supported by this updater")
-            package_id = str(package["id"])
-            if not package_id.isalnum() or len(package_id) > 128:
-                raise UpdaterError("assignment package ID is invalid")
-            if str(package.get("product", "")) != self.config.product:
-                raise UpdaterError("assigned package targets a different product")
-            package_arch = str(package.get("arch", "")).lower()
-            board_arch = platform.machine().lower()
-            if package_arch not in {"all", board_arch, "arm64" if board_arch == "aarch64" else board_arch}:
-                raise UpdaterError("assigned package architecture does not match this board")
-            token = self._token()
-            destination = self.packages_dir / f"{package_id}.jvpkg"
-            partial = destination.with_suffix(".jvpkg.part")
-            previous_download = state.get("download")
-            if (
-                isinstance(previous_download, dict)
-                and previous_download.get("ready")
-                and previous_download.get("package_id") == package_id
-                and destination.is_file()
-            ):
-                assignment_id = str(selected.get("id", ""))
-                previous_download["assignment_id"] = assignment_id
-                state["download"] = previous_download
-                self.state_store.write(state)
-                previous_manifest = previous_download.get("manifest")
-                if not isinstance(previous_manifest, dict):
-                    previous_manifest = {}
-                await self._report_assignment(
-                    "downloaded",
-                    {
-                        "package_id": package_id,
-                        "version": previous_manifest.get("version", ""),
-                        "signed": bool(previous_download.get("signed")),
-                    },
-                    assignment_id=assignment_id,
-                )
-                return self.status()
-            offset = partial.stat().st_size if partial.exists() else 0
-            headers = {"Authorization": f"Bearer {token}"}
-            if offset:
-                headers["Range"] = f"bytes={offset}-"
-            url = f"{self.config.center_url.rstrip('/')}/v1/packages/{package_id}/download"
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=None, sock_connect=30)) as response:
-                    if response.status not in {200, 206}:
+    async def _download_to(self, url: str, partial: Path, expected_size: int) -> None:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=30)) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
                         detail = await response.text()
                         raise UpdaterError(detail or f"package download failed: HTTP {response.status}")
-                    mode = "ab" if response.status == 206 and offset else "wb"
-                    with partial.open(mode) as handle:
+                    content_length = response.content_length
+                    if content_length is not None and content_length != expected_size:
+                        raise UpdaterError("package Content-Length does not match the update response")
+                    downloaded = 0
+                    with partial.open("wb") as handle:
                         async for chunk in response.content.iter_chunked(1024 * 1024):
+                            downloaded += len(chunk)
+                            if downloaded > expected_size:
+                                raise UpdaterError("package download exceeded the declared size")
                             handle.write(chunk)
                         handle.flush()
                         os.fsync(handle.fileno())
-            os.replace(partial, destination)
-            expected = str(package.get("sha256", ""))
-            actual = sha256_file(destination)
-            if expected and actual != expected:
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise UpdaterError(f"package download failed: {exc}") from exc
+
+    async def download_update(self) -> dict[str, Any]:
+        async with self.operation_lock:
+            state = self.state_store.read()
+            update = state.get("update")
+            if not isinstance(update, dict):
+                raise UpdaterError("no company update is available")
+            destination = self.packages_dir / str(update["package_name"])
+            partial = destination.with_suffix(destination.suffix + ".part")
+            await self._report_upgrade(1, "Package download started.")
+            try:
+                if not self.config.allow_unsigned_packages:
+                    raise UpdaterError("unsigned company ZIP packages are disabled on this device")
+                url = str(update.get("download_url", ""))
+                if not url:
+                    refreshed = await self._check_company(report_terminal=False)
+                    if not refreshed or refreshed["version"] != update["version"]:
+                        raise UpdaterError("company update no longer provides the selected package")
+                    update = refreshed
+                    url = str(update.get("download_url", ""))
+                    state = self.state_store.read()
+                    state["update"] = update
+                    self.state_store.write(state)
+                if not url:
+                    raise UpdaterError("company update did not provide a temporary download URL")
+                try:
+                    await self._download_to(url, partial, int(update["package_size"]))
+                except UpdaterError:
+                    refreshed = await self._check_company(report_terminal=False)
+                    if (
+                        not refreshed
+                        or refreshed["version"] != update["version"]
+                        or not refreshed["download_url"]
+                    ):
+                        raise
+                    update = refreshed
+                    state = self.state_store.read()
+                    state["update"] = update
+                    self.state_store.write(state)
+                    await self._download_to(
+                        str(refreshed["download_url"]), partial, int(refreshed["package_size"])
+                    )
+                if partial.stat().st_size != int(update["package_size"]):
+                    raise UpdaterError("downloaded package size does not match the update response")
+                os.replace(partial, destination)
+                info = verify_company_package(
+                    destination,
+                    expected_size=int(update["package_size"]),
+                    expected_app_code=self.config.app_code,
+                    expected_platform=self.config.platform,
+                    expected_version=str(update["version"]),
+                    work_root=self.config.state_dir,
+                )
+                try:
+                    manifest = dict(info.manifest)
+                finally:
+                    info.cleanup()
+            except Exception as exc:
+                partial.unlink(missing_ok=True)
                 destination.unlink(missing_ok=True)
-                raise UpdaterError("downloaded package SHA-256 mismatch")
-            info = verify_package(
-                destination,
-                self.config.public_key_file if Path(self.config.public_key_file).is_file() else None,
-                allow_unsigned=self.config.allow_unsigned_packages,
-                work_root=self.config.state_dir,
-            )
-            manifest = dict(info.manifest)
-            signed = info.signed
-            info.cleanup()
+                value = self.state_store.read()
+                value.update(download=None, last_error=str(exc))
+                self.state_store.write(value)
+                await self._report_upgrade(
+                    5,
+                    "Package download or verification failed.",
+                    error=str(exc),
+                    current_version=self._current_version(),
+                    current_version_id=self._integer(
+                        value.get("current_version_id"), "currentVersionId", optional=True
+                    ),
+                )
+                raise
             state = self.state_store.read()
             state["download"] = {
-                "assignment_id": str(selected.get("id", "")),
-                "package_id": package_id,
+                "ready": True,
                 "path": str(destination),
                 "manifest": manifest,
-                "signed": signed,
-                "ready": True,
                 "downloaded_at": int(time.time()),
+                "package_sha256": sha256_file(destination),
             }
+            state["last_error"] = ""
             self.state_store.write(state)
-            await self._report_assignment(
-                "downloaded",
-                {
-                    "package_id": package_id,
-                    "version": manifest.get("version", ""),
-                    "signed": signed,
-                },
-                assignment_id=str(selected.get("id", "")),
-            )
+            await self._report_upgrade(2, "Package downloaded; size, ZIP CRC, and payload SHA-256 verified.")
             return self.status()
 
     async def install_downloaded(self) -> dict[str, Any]:
         async with self.operation_lock:
             state = self.state_store.read()
             download = state.get("download")
-            if not isinstance(download, dict) or not download.get("ready"):
-                raise UpdaterError("no verified update is ready to install")
-            assignment_id = str(download.get("assignment_id", ""))
+            update = state.get("update")
+            if not isinstance(download, dict) or not download.get("ready") or not isinstance(update, dict):
+                raise UpdaterError("no verified company update is ready to install")
             package_path = Path(str(download.get("path", "")))
+            old_version = self._current_version()
+            old_version_id = self._integer(state.get("current_version_id"), "currentVersionId", optional=True)
+            state["installing"] = True
+            self.state_store.write(state)
+            await self._report_upgrade(3, "Installation started; preparing atomic application release.")
             try:
-                info = verify_package(
+                info = verify_company_package(
                     package_path,
-                    self.config.public_key_file if Path(self.config.public_key_file).is_file() else None,
-                    allow_unsigned=self.config.allow_unsigned_packages,
+                    expected_size=int(update["package_size"]),
+                    expected_app_code=self.config.app_code,
+                    expected_platform=self.config.platform,
+                    expected_version=str(update["version"]),
                     work_root=self.config.state_dir,
                 )
                 try:
-                    package_type = str(info.manifest["package_type"])
-                    if package_type == "application":
-                        result = await asyncio.to_thread(self.installer.install, info)
-                    elif package_type == "printer_driver":
-                        result = await asyncio.to_thread(self.driver_installer.install, info)
-                    else:
-                        raise UpdaterError("downloaded package type is not installable")
+                    result = await asyncio.to_thread(self.installer.install, info)
                 finally:
                     info.cleanup()
             except Exception as exc:
                 state = self.state_store.read()
-                state["last_error"] = str(exc)
+                state.update(last_error=str(exc), installing=False)
                 self.state_store.write(state)
-                await self._report_assignment(
-                    "failed",
-                    {"error": str(exc)[:2000], "package_id": str(download.get("package_id", ""))},
-                    assignment_id=assignment_id,
+                await self._report_upgrade(
+                    5,
+                    "Upgrade failed; the application installer restored the previous release.",
+                    error=str(exc),
+                    current_version=old_version,
+                    current_version_id=old_version_id,
                 )
+                if self.installer.last_rollback_attempted and self.installer.last_rollback_succeeded:
+                    await self._report_rollback(0, "Automatic rollback started after installation failure.")
+                    await self._report_rollback(
+                        1,
+                        "Automatic rollback completed; previous release is active.",
+                        current_version=old_version,
+                        current_version_id=old_version_id,
+                    )
+                elif self.installer.last_rollback_attempted:
+                    await self._report_rollback(2, "Automatic rollback failed.", error=str(exc))
                 raise
-            await self._report_assignment("installed", result, assignment_id=assignment_id)
+            new_version_id = int(update["version_id"])
+            await self._report_upgrade(
+                4,
+                "Upgrade completed and health check passed.",
+                current_version=str(result["version"]),
+                current_version_id=new_version_id,
+            )
             state = self.state_store.read()
-            state.update(last_error="", download=None, assignment=None)
+            completed_record_id = update.get("record_id")
+            state.update(
+                current_version_id=new_version_id,
+                previous_version_id=old_version_id,
+                previous_version=server_version(old_version),
+                last_record_id=completed_record_id,
+                last_error="",
+                installing=False,
+                operation="",
+                download=None,
+                update=None,
+            )
             self.state_store.write(state)
+            self._schedule_agent_restart()
             return self.status()
+
+    def _start_background(self, operation: str, callback: Callable[[], Any]) -> dict[str, Any]:
+        if self.background_operation is not None and not self.background_operation.done():
+            raise UpdaterError("another update operation is already running")
+        state = self.state_store.read()
+        state.update(installing=True, operation=operation, last_error="")
+        self.state_store.write(state)
+
+        async def run() -> None:
+            await asyncio.sleep(2)
+            try:
+                await callback()
+            except Exception as exc:
+                LOGGER.exception("background update operation failed: %s", operation)
+                value = self.state_store.read()
+                value.update(installing=False, operation="", last_error=str(exc))
+                self.state_store.write(value)
+
+        self.background_operation = asyncio.create_task(run(), name=f"jvlei-update-{operation}")
+        return self.status()
+
+    def start_install(self) -> dict[str, Any]:
+        state = self.state_store.read()
+        download = state.get("download")
+        if not isinstance(download, dict) or not download.get("ready"):
+            raise UpdaterError("no verified company update is ready to install")
+        return self._start_background("install", self.install_downloaded)
+
+    def start_auto_update(self) -> dict[str, Any]:
+        state = self.state_store.read()
+        update = state.get("update")
+        if not isinstance(update, dict) or update.get("auto_upgrade") is not True:
+            raise UpdaterError("no automatic company update is available")
+
+        async def execute() -> None:
+            await self.download_update()
+            await self.install_downloaded()
+
+        return self._start_background("auto_upgrade", execute)
+
+    def start_rollback(self) -> dict[str, Any]:
+        if not self.state_store.read().get("previous_release"):
+            raise UpdaterError("no previous release is available")
+        return self._start_background("rollback", self.rollback)
+
+    def _schedule_agent_restart(self) -> None:
+        try:
+            subprocess.Popen(
+                [
+                    "systemd-run",
+                    "--quiet",
+                    "--collect",
+                    "--unit=jvlei-updater-self-restart",
+                    "--on-active=3s",
+                    "systemctl",
+                    "restart",
+                    "jvlei-updater.service",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            LOGGER.exception("failed to schedule updater service restart")
 
     async def rollback(self) -> dict[str, Any]:
         async with self.operation_lock:
-            result = await asyncio.to_thread(self.installer.rollback)
-            await self._report_assignment("rolled_back", result)
+            state = self.state_store.read()
+            update = state.get("update")
+            if not isinstance(update, dict):
+                record_id = state.get("last_record_id")
+                if record_id:
+                    state["update"] = {"record_id": record_id}
+                    self.state_store.write(state)
+            await self._report_rollback(0, "Manual rollback started from the device management page.")
+            try:
+                result = await asyncio.to_thread(self.installer.rollback)
+            except Exception as exc:
+                await self._report_rollback(2, "Manual rollback failed.", error=str(exc))
+                raise
+            previous_id = self._integer(state.get("previous_version_id"), "previousVersionId", optional=True)
+            await self._report_rollback(
+                1,
+                "Manual rollback completed and health check passed.",
+                current_version=str(result["version"]),
+                current_version_id=previous_id,
+            )
+            state = self.state_store.read()
+            current_id = state.get("current_version_id")
+            state.update(
+                current_version_id=previous_id,
+                previous_version_id=current_id,
+                last_record_id=None,
+                update=None,
+                download=None,
+                last_error="",
+                installing=False,
+                operation="",
+            )
+            self.state_store.write(state)
+            self._schedule_agent_restart()
             return self.status()
 
-    async def _report_assignment(
-        self,
-        status: str,
-        detail: dict[str, Any],
-        assignment_id: str = "",
-    ) -> None:
-        state = self.state_store.read()
-        if not assignment_id:
-            assignment = state.get("assignment")
-            if isinstance(assignment, dict):
-                assignment_id = str(assignment.get("id", ""))
-        if not assignment_id:
-            download = state.get("download")
-            if isinstance(download, dict):
-                assignment_id = str(download.get("assignment_id", ""))
-        if not assignment_id or not self._token():
+    async def run_boot_check(self) -> None:
+        if not self.config.enabled or not self.config.boot_check:
             return
         try:
-            async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {self._token()}"}) as session:
-                async with session.post(
-                    f"{self.config.center_url.rstrip('/')}/v1/jobs/{assignment_id}/status",
-                    json={"status": status, "detail": detail},
-                    timeout=aiohttp.ClientTimeout(total=20),
-                ) as response:
-                    await response.read()
-        except Exception:
-            LOGGER.exception("failed to report updater job status")
-
-    def set_policy(self, policy: str) -> dict[str, Any]:
-        if policy not in INSTALL_POLICIES:
-            raise UpdaterError("invalid install policy")
-        self.config.install_policy = policy
-        self._save_config()
-        return self.status()
-
-    async def run_poll_loop(self) -> None:
-        delay = self.config.check_interval_seconds
-        while not self.stop_event.is_set():
-            if self.config.enabled and self.config.agent_id and self._token():
-                try:
-                    await self.check_once()
-                    delay = self.config.check_interval_seconds
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    LOGGER.warning("update center check failed: %s", exc)
-                    state = self.state_store.read()
-                    state["last_error"] = str(exc)
-                    self.state_store.write(state)
-                    delay = min(max(delay * 2, self.config.check_interval_seconds), self.config.max_backoff_seconds)
-            jitter = random.uniform(0, min(10, delay * 0.1))
-            try:
-                await asyncio.wait_for(self.wake_event.wait(), timeout=delay + jitter)
-                self.wake_event.clear()
-                delay = self.config.check_interval_seconds
-            except asyncio.TimeoutError:
-                pass
+            status = await self.check_once(auto_execute=False)
+            update = status.get("update")
+            if isinstance(update, dict) and update.get("auto_upgrade") is True:
+                self.start_auto_update()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.warning("company update boot check failed: %s", exc)
 
     def stop(self) -> None:
         self.stop_event.set()
-        self.wake_event.set()

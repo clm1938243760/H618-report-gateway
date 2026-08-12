@@ -11,6 +11,7 @@ build/
 *.pdf
 *.log
 *.jvpkg
+*.zip.sha256
 *.token
 *.pem
 *.key
@@ -18,5 +19,6 @@ build/
 update_center/config.yaml
 update_center_data/
 output/
+outputs/
 tmp/
 .playwright-cli/

@@ -247,6 +247,9 @@ def safe_extract_payload(
         members = archive.getmembers()
         if len(members) > 100000:
             raise PackageError("payload contains too many files")
+        names = [member.name for member in members]
+        if len(names) != len(set(names)):
+            raise PackageError("payload contains duplicate paths")
         for member in members:
             pure = PurePosixPath(member.name)
             if pure.is_absolute() or not pure.parts or ".." in pure.parts:
@@ -274,6 +277,42 @@ def safe_extract_payload(
             os.chmod(resolved, member.mode & 0o777)
             extracted.append(member.name)
     return extracted
+
+
+def inspect_payload(
+    payload_path: str | Path,
+    maximum_bytes: int = MAX_EXTRACTED_BYTES,
+) -> list[str]:
+    """Validate payload members without writing the expanded archive to disk."""
+
+    try:
+        archive = tarfile.open(payload_path, mode="r:gz")
+    except (tarfile.TarError, OSError) as exc:
+        raise PackageError(f"invalid payload archive: {exc}") from exc
+    files: list[str] = []
+    total = 0
+    with archive:
+        members = archive.getmembers()
+        if len(members) > 100000:
+            raise PackageError("payload contains too many files")
+        names = [member.name for member in members]
+        if len(names) != len(set(names)):
+            raise PackageError("payload contains duplicate paths")
+        for member in members:
+            pure = PurePosixPath(member.name)
+            if pure.is_absolute() or not pure.parts or ".." in pure.parts:
+                raise PackageError(f"unsafe payload path: {member.name}")
+            if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                raise PackageError(f"unsupported payload member: {member.name}")
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise PackageError(f"unsupported payload member: {member.name}")
+            total += member.size
+            if total > maximum_bytes:
+                raise PackageError("extracted payload is too large")
+            files.append(member.name)
+    return files
 
 
 def _sign_manifest(manifest_path: Path, signature_path: Path, private_key: Path) -> None:

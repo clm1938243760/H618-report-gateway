@@ -17,47 +17,43 @@ def create_local_app(service: UpdaterService) -> web.Application:
     async def status(request: web.Request) -> web.Response:
         return web.json_response(service.status())
 
-    async def pair(request: web.Request) -> web.Response:
-        payload = await request.json()
-        try:
-            result = await service.pair(str(payload.get("pairing_code", "")))
-        except (UpdaterError, OSError) as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        return web.json_response(result)
-
     async def check(request: web.Request) -> web.Response:
         try:
-            result = await service.check_once()
+            result = await service.check_once(auto_execute=False)
+            update = result.get("update")
+            if isinstance(update, dict) and update.get("auto_upgrade") is True:
+                result = service.start_auto_update()
+                return web.json_response(result, status=202)
         except (UpdaterError, OSError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         return web.json_response(result)
 
     async def download(request: web.Request) -> web.Response:
         try:
-            result = await service.download_assignment()
+            result = await service.download_update()
         except (UpdaterError, PackageError, OSError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         return web.json_response(result)
 
     async def install(request: web.Request) -> web.Response:
         try:
-            result = await service.install_downloaded()
+            result = service.start_install()
         except (UpdaterError, PackageError, OSError) as exc:
             logging.getLogger(__name__).exception("update installation failed")
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        return web.json_response(result)
+        return web.json_response(result, status=202)
 
     async def rollback(request: web.Request) -> web.Response:
         try:
-            result = await service.rollback()
+            result = service.start_rollback()
         except (UpdaterError, OSError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        return web.json_response(result)
+        return web.json_response(result, status=202)
 
-    async def policy(request: web.Request) -> web.Response:
+    async def configure(request: web.Request) -> web.Response:
         payload = await request.json()
         try:
-            result = service.set_policy(str(payload.get("install_policy", "")))
+            result = service.set_center_url(str(payload.get("center_url", "")))
         except (UpdaterError, OSError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         return web.json_response(result)
@@ -65,12 +61,11 @@ def create_local_app(service: UpdaterService) -> web.Application:
     app.add_routes(
         [
             web.get("/status", status),
-            web.post("/pair", pair),
             web.post("/check", check),
             web.post("/download", download),
             web.post("/install", install),
             web.post("/rollback", rollback),
-            web.put("/policy", policy),
+            web.put("/config", configure),
         ]
     )
     return app
@@ -90,15 +85,15 @@ async def main_async() -> None:
     await runner.setup()
     site = web.TCPSite(runner, config.local_api_host, config.local_api_port)
     await site.start()
-    poll_task = asyncio.create_task(service.run_poll_loop())
+    boot_task = asyncio.create_task(service.run_boot_check())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
     service.stop()
-    poll_task.cancel()
-    await asyncio.gather(poll_task, return_exceptions=True)
+    boot_task.cancel()
+    await asyncio.gather(boot_task, return_exceptions=True)
     await runner.cleanup()
 
 

@@ -10,7 +10,7 @@ class UpdaterClientError(RuntimeError):
 
 
 class UpdaterClient:
-    """Small authenticated-by-loopback client for ``jvlei-updater.service``.
+    """Small loopback-only client for ``jvlei-updater.service``.
 
     The updater binds only to 127.0.0.1.  The public HTTPS management service
     remains the sole browser-facing entry point and adds its existing login and
@@ -57,9 +57,6 @@ class UpdaterClient:
             return {"ok": True, "available": False, "error": str(exc)}
         return {"available": True, **result}
 
-    async def pair(self, pairing_code: str) -> dict[str, Any]:
-        return await self._request("POST", "/pair", {"pairing_code": pairing_code})
-
     async def check(self) -> dict[str, Any]:
         return await self._request("POST", "/check", {})
 
@@ -72,5 +69,5 @@ class UpdaterClient:
     async def rollback(self) -> dict[str, Any]:
         return await self._request("POST", "/rollback", {})
 
-    async def set_policy(self, install_policy: str) -> dict[str, Any]:
-        return await self._request("PUT", "/policy", {"install_policy": install_policy})
+    async def configure(self, center_url: str) -> dict[str, Any]:
+        return await self._request("PUT", "/config", {"center_url": center_url})
