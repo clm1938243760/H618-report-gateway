@@ -749,6 +749,9 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/api/printer/config", headers=headers)
         public_config = await response.json()
         self.assertEqual(response.status, 200, public_config)
+        self.assertTrue(public_config["boundary_detection"]["enabled"])
+        self.assertEqual(public_config["boundary_detection"]["mode"], "protocol_first")
+        self.assertIn("PCL", public_config["boundary_detection"]["supported_protocols"])
         for hidden in ("usb_vendor_id", "usb_product_id", "usb_manufacturer", "usb_pnp_string"):
             self.assertNotIn(hidden, public_config)
 

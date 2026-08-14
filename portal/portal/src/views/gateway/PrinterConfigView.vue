@@ -23,6 +23,10 @@
         <span>向主机声明的协议</span>
         <strong>{{ selectedProfile?.commands || "-" }}</strong>
       </div>
+      <div class="summary-item">
+        <span>任务结束判定</span>
+        <strong class="success-text">{{ form.boundary_detection?.enabled ? "智能协议优先" : "仅超时判断" }}</strong>
+      </div>
     </div>
 
     <el-form ref="formRef" :model="form" label-position="top">
@@ -45,8 +49,9 @@
           <el-form-item label="设备序列号" prop="usb_serial" :rules="textRules('请输入设备序列号')">
             <el-input v-model="form.usb_serial" maxlength="64" />
           </el-form-item>
-          <el-form-item label="任务结束等待（秒）">
+          <el-form-item label="未知/异常打印流兜底等待（秒）">
             <el-input-number v-model="form.idle_complete_seconds" :min="0.5" :max="120" :step="0.5" controls-position="right" />
+            <div class="field-help">PJL、PCL、PCL XL、PostScript和PDF优先按协议结束，不等待该时间。</div>
           </el-form-item>
           <el-form-item label="最小任务大小（字节）">
             <el-input-number v-model="form.min_job_bytes" :min="1" :max="10485760" controls-position="right" />
@@ -62,13 +67,27 @@
       </div>
       <el-table :data="jobs" stripe height="390" class="desktop-only">
         <el-table-column label="接收时间" width="180">
-          <template #default="{ row }">{{ formatTime(row.modified_at) }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.first_byte_at) !== "-" ? formatDateTime(row.first_byte_at) : formatTime(row.modified_at) }}</template>
         </el-table-column>
         <el-table-column prop="name" label="PRN 文件" min-width="270" show-overflow-tooltip />
         <el-table-column label="大小" width="110">
           <template #default="{ row }">{{ formatBytes(row.size) }}</template>
         </el-table-column>
         <el-table-column prop="protocol_label" label="识别协议" width="145" />
+        <el-table-column label="结束依据" width="150">
+          <template #default="{ row }">{{ row.completion_reason_label || "-" }}</template>
+        </el-table-column>
+        <el-table-column label="接收耗时" width="115">
+          <template #default="{ row }">{{ formatDuration(row.receive_duration_ms) }}</template>
+        </el-table-column>
+        <el-table-column label="转换耗时" width="115">
+          <template #default="{ row }">{{ formatDuration(row.conversion_duration_ms) }}</template>
+        </el-table-column>
+        <el-table-column label="转换状态" width="120">
+          <template #default="{ row }">
+            <el-tag :type="conversionType(row.conversion_status)" effect="light">{{ row.conversion_status_label || "-" }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="PJL 声明" width="130">
           <template #default="{ row }">{{ row.declared_language || "-" }}</template>
         </el-table-column>
@@ -92,7 +111,7 @@
           <div class="mobile-record-heading">
             <div>
               <strong>{{ row.name }}</strong>
-              <span>{{ formatTime(row.modified_at) }} · {{ formatBytes(row.size) }}</span>
+              <span>{{ formatDateTime(row.first_byte_at) !== "-" ? formatDateTime(row.first_byte_at) : formatTime(row.modified_at) }} · {{ formatBytes(row.size) }}</span>
             </div>
             <el-tag :type="confidenceType(row.confidence)" effect="light">
               {{ confidenceName(row.confidence) }}可信度
@@ -101,6 +120,14 @@
           <dl class="mobile-record-meta">
             <dt>识别协议</dt>
             <dd>{{ row.protocol_label }}</dd>
+            <dt>结束依据</dt>
+            <dd>{{ row.completion_reason_label || "-" }}</dd>
+            <dt>接收耗时</dt>
+            <dd>{{ formatDuration(row.receive_duration_ms) }}</dd>
+            <dt>转换耗时</dt>
+            <dd>{{ formatDuration(row.conversion_duration_ms) }}</dd>
+            <dt>转换状态</dt>
+            <dd>{{ row.conversion_status_label || "-" }}</dd>
             <dt>PJL 声明</dt>
             <dd>{{ row.declared_language || "-" }}</dd>
             <dt>处理方式</dt>
@@ -125,6 +152,24 @@
         <dd>{{ formatBytes(selectedJob.size) }}</dd>
         <dt>识别协议</dt>
         <dd>{{ selectedJob.protocol_label }}（{{ confidenceName(selectedJob.confidence) }}置信度）</dd>
+        <dt>结束判定</dt>
+        <dd>{{ selectedJob.completion_reason_label || "旧任务无采集元数据" }}</dd>
+        <dt>首字节时间</dt>
+        <dd>{{ formatDateTime(selectedJob.first_byte_at) }}</dd>
+        <dt>末字节时间</dt>
+        <dd>{{ formatDateTime(selectedJob.last_byte_at) }}</dd>
+        <dt>边界确认时间</dt>
+        <dd>{{ formatDateTime(selectedJob.boundary_detected_at) }}</dd>
+        <dt>打印流接收耗时</dt>
+        <dd>{{ formatDuration(selectedJob.receive_duration_ms) }}</dd>
+        <dt>任务完成耗时</dt>
+        <dd>{{ formatDuration(selectedJob.completion_duration_ms) }}</dd>
+        <dt>PDF转换</dt>
+        <dd>{{ selectedJob.conversion_status_label || "-" }}，耗时 {{ formatDuration(selectedJob.conversion_duration_ms) }}</dd>
+        <dt>PDF就绪时间</dt>
+        <dd>{{ formatDateTime(selectedJob.pdf_ready_at) }}</dd>
+        <dt v-if="selectedJob.conversion_error">转换错误</dt>
+        <dd v-if="selectedJob.conversion_error" class="detail-block">{{ selectedJob.conversion_error }}</dd>
         <dt>PJL 声明语言</dt>
         <dd>{{ selectedJob.declared_language || "未声明" }}</dd>
         <dt>处理方式</dt>
@@ -155,7 +200,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { DocumentChecked, Download, Refresh, View } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, errorMessage } from "@/api/client";
-import { formatBytes, formatTime } from "@/utils/format";
+import { formatBytes, formatDateTime, formatTime } from "@/utils/format";
 
 const formRef = ref();
 const loading = ref(false);
@@ -171,6 +216,12 @@ const form = reactive({
   usb_serial: "K2B-H618-PRINTER-001",
   idle_complete_seconds: 20,
   min_job_bytes: 128,
+  boundary_detection: {
+    enabled: true,
+    mode: "protocol_first",
+    supported_protocols: [],
+    ambiguous_marker_grace_ms: 200
+  },
   active: false
 });
 const selectedProfile = computed(() => form.driver_profiles.find((item) => item.value === form.driver_profile));
@@ -257,6 +308,18 @@ function confidenceType(value) {
 
 function confidenceName(value) {
   return value === "high" ? "高" : value === "medium" ? "中" : "低";
+}
+
+function conversionType(value) {
+  return value === "completed" ? "success" : value === "failed" ? "danger" : value === "running" ? "warning" : "info";
+}
+
+function formatDuration(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "-";
+  if (milliseconds < 1000) return `${milliseconds.toFixed(milliseconds < 10 ? 1 : 0)} ms`;
+  return `${(milliseconds / 1000).toFixed(3)} s`;
 }
 
 onMounted(loadAll);

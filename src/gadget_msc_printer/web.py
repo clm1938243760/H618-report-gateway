@@ -33,6 +33,7 @@ from .driver_manager import DriverError, DriverManager, MAX_DRIVER_BYTES
 from .maintenance import MaintenanceManager
 from .physical_print import PhysicalPrintWorker
 from .prn_analyzer import analyze_recent_prn
+from .print_boundary import BOUNDARY_GRACE_NS, SUPPORTED_BOUNDARY_PROTOCOLS
 from .report_info import ReportInfoManager
 from .report_upload import ReportUploadWorker
 from .updater_client import UpdaterClient, UpdaterClientError
@@ -156,7 +157,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.4"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.5"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
@@ -409,6 +410,12 @@ class ConfigWebApp:
                 "usb_serial": config.printer.usb_serial,
                 "idle_complete_seconds": config.printer.idle_complete_seconds,
                 "min_job_bytes": config.printer.min_job_bytes,
+                "boundary_detection": {
+                    "enabled": True,
+                    "mode": "protocol_first",
+                    "supported_protocols": list(SUPPORTED_BOUNDARY_PROTOCOLS),
+                    "ambiguous_marker_grace_ms": BOUNDARY_GRACE_NS // 1_000_000,
+                },
                 "active": config.gadget.mode in {"printer", "printer_hid"},
             }
         )

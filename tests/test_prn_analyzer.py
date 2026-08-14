@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -65,6 +66,47 @@ class PrnAnalyzerTests(unittest.TestCase):
 
         self.assertEqual(result["modified_at"], timestamp)
         self.assertEqual(result["modified_time"], "2025-06-15T15:06:40+00:00")
+
+    def test_capture_metadata_adds_boundary_and_timing_details(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "captured.prn"
+            path.write_bytes(b"\x1bE\x1b*t300Rpage\x1bE\x1b%-12345X")
+            path.with_suffix(".prn.meta.json").write_text(
+                json.dumps(
+                    {
+                        "protocol": "pcl",
+                        "completion_reason": "pcl_uel",
+                        "first_byte_at": "2026-08-14T00:00:00.000+00:00",
+                        "last_byte_at": "2026-08-14T00:00:01.250+00:00",
+                        "boundary_detected_at": "2026-08-14T00:00:01.250+00:00",
+                        "receive_duration_ms": 1250.0,
+                        "completion_duration_ms": 1250.0,
+                        "received_bytes": 31,
+                        "conversion_started_at": "2026-08-14T00:00:01.251+00:00",
+                        "pdf_ready_at": "2026-08-14T00:00:01.501+00:00",
+                        "conversion_duration_ms": 250.0,
+                        "conversion_status": "completed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = analyze_prn(path)
+
+        self.assertTrue(result["capture_metadata"])
+        self.assertEqual(result["completion_reason_label"], "PCL UEL 结束")
+        self.assertEqual(result["receive_duration_ms"], 1250.0)
+        self.assertEqual(result["conversion_duration_ms"], 250.0)
+        self.assertEqual(result["conversion_status_label"], "转换完成")
+
+    def test_invalid_capture_metadata_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.prn"
+            path.write_bytes(b"%PDF-1.7")
+            path.with_suffix(".prn.meta.json").write_text("not-json", encoding="utf-8")
+            result = analyze_prn(path)
+
+        self.assertFalse(result["capture_metadata"])
+        self.assertIsNone(result["receive_duration_ms"])
 
 
 if __name__ == "__main__":

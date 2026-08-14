@@ -13,3 +13,10 @@ export function formatTime(value) {
   if (!timestamp) return "-";
   return dayjs(timestamp * 1000).format("YYYY-MM-DD HH:mm:ss");
 }
+
+export function formatDateTime(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "number") return formatTime(value);
+  const parsed = dayjs(value);
+  return parsed.isValid() ? parsed.format("YYYY-MM-DD HH:mm:ss.SSS") : "-";
+}

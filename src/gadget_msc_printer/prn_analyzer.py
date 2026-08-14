@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,27 @@ CONVERSION_DETAILS = {
 }
 SAMPLE_LIMIT = 256 * 1024
 HEADER_PREVIEW_BYTES = 64
+METADATA_LIMIT = 64 * 1024
+COMPLETION_REASON_LABELS = {
+    "pjl_eoj": "PJL 作业结束",
+    "pjl_uel": "PJL/UEL 结束",
+    "pcl_uel": "PCL UEL 结束",
+    "pclxl_uel": "PCL XL UEL 结束",
+    "postscript_uel": "PostScript UEL 结束",
+    "postscript_ctrl_d": "PostScript Ctrl-D 结束",
+    "postscript_eof": "PostScript EOF 结束",
+    "pdf_eof": "PDF EOF 结束",
+    "idle_timeout": "空闲超时兜底",
+    "device_disconnect": "USB 断开",
+    "recovered_after_restart": "重启后恢复",
+}
+CONVERSION_STATUS_LABELS = {
+    "pending": "等待转换",
+    "running": "正在转换",
+    "completed": "转换完成",
+    "failed": "转换失败",
+    "disabled": "转换未启用",
+}
 
 
 def analyze_prn(path: str | Path) -> dict[str, Any]:
@@ -79,6 +101,9 @@ def analyze_prn(path: str | Path) -> dict[str, Any]:
     declared_language = language_match.group(1).decode("ascii") if language_match else ""
     converter, conversion_detail = CONVERSION_DETAILS[protocol]
     header = data[:HEADER_PREVIEW_BYTES]
+    capture = _load_capture_metadata(source)
+    completion_reason = str(capture.get("completion_reason", ""))
+    conversion_status = str(capture.get("conversion_status", ""))
 
     return {
         "name": source.name,
@@ -99,6 +124,30 @@ def analyze_prn(path: str | Path) -> dict[str, Any]:
         "pjl_commands": pjl_commands,
         "converter": converter,
         "conversion_detail": conversion_detail,
+        "capture_metadata": bool(capture),
+        "capture_protocol": str(capture.get("protocol", "")),
+        "completion_reason": completion_reason,
+        "completion_reason_label": COMPLETION_REASON_LABELS.get(
+            completion_reason, completion_reason or "-"
+        ),
+        "first_byte_at": str(capture.get("first_byte_at", "")),
+        "last_byte_at": str(capture.get("last_byte_at", "")),
+        "boundary_detected_at": str(capture.get("boundary_detected_at", "")),
+        "receive_duration_ms": _number_or_none(capture.get("receive_duration_ms")),
+        "completion_duration_ms": _number_or_none(
+            capture.get("completion_duration_ms")
+        ),
+        "received_bytes": _integer_or_none(capture.get("received_bytes")),
+        "conversion_started_at": str(capture.get("conversion_started_at", "")),
+        "pdf_ready_at": str(capture.get("pdf_ready_at", "")),
+        "conversion_duration_ms": _number_or_none(
+            capture.get("conversion_duration_ms")
+        ),
+        "conversion_status": conversion_status,
+        "conversion_status_label": CONVERSION_STATUS_LABELS.get(
+            conversion_status, conversion_status or "-"
+        ),
+        "conversion_error": str(capture.get("conversion_error", ""))[:1000],
     }
 
 
@@ -134,6 +183,22 @@ def analyze_recent_prn(directory: str | Path, limit: int = 20) -> list[dict[str,
                     "pjl_commands": [],
                     "converter": "无法分析",
                     "conversion_detail": "文件读取失败",
+                    "capture_metadata": False,
+                    "capture_protocol": "",
+                    "completion_reason": "",
+                    "completion_reason_label": "-",
+                    "first_byte_at": "",
+                    "last_byte_at": "",
+                    "boundary_detected_at": "",
+                    "receive_duration_ms": None,
+                    "completion_duration_ms": None,
+                    "received_bytes": None,
+                    "conversion_started_at": "",
+                    "pdf_ready_at": "",
+                    "conversion_duration_ms": None,
+                    "conversion_status": "",
+                    "conversion_status_label": "-",
+                    "conversion_error": "",
                 }
             )
     return results
@@ -156,3 +221,30 @@ def _extract_pjl_commands(data: bytes) -> list[str]:
         if len(commands) >= 12:
             break
     return commands
+
+
+def _load_capture_metadata(source: Path) -> dict[str, Any]:
+    path = source.with_suffix(source.suffix + ".meta.json")
+    try:
+        if path.stat().st_size > METADATA_LIMIT:
+            return {}
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _number_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _integer_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None

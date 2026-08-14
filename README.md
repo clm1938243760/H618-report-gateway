@@ -1,7 +1,7 @@
 # KICKPI K2B MSC / Printer 报告网关
 
-当前开发版本：`v0.22.4`。完整变更和部署注意事项见
-[v0.22.4 版本说明](docs/RELEASE_NOTES_v0.22.4.md)。
+当前开发版本：`v0.22.5`。完整变更和部署注意事项见
+[v0.22.5 版本说明](docs/RELEASE_NOTES_v0.22.5.md)。
 
 本项目是 RK3566 报告网关的独立迁移版本，目标硬件为 KICKPI K2B（Allwinner
 H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发和部署改动。
