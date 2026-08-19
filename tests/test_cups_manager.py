@@ -57,6 +57,22 @@ class CupsManagerTests(unittest.TestCase):
         self.assertTrue(profile["available"])
         self.assertEqual(profile["model"], "drv:///brlaser.drv/br1200.ppd")
 
+    def test_fast_status_uses_cached_models_and_only_scans_on_request(self) -> None:
+        runner = FakeRunner()
+        manager = CupsManager(runner)
+        first = manager.status(PhysicalPrinterConfig(), scan_devices=False)
+        second = manager.status(PhysicalPrinterConfig(), scan_devices=False)
+        self.assertEqual(first["devices"], [])
+        self.assertEqual(second["devices"], [])
+        self.assertNotIn(["lpinfo", "-v"], runner.commands)
+        self.assertEqual(runner.commands.count(["lpinfo", "-m"]), 1)
+
+        discovered = manager.discover_devices()
+        cached = manager.status(PhysicalPrinterConfig(), scan_devices=False)
+        self.assertEqual(len(discovered), 3)
+        self.assertEqual(cached["devices"], discovered)
+        self.assertEqual(runner.commands.count(["lpinfo", "-v"]), 1)
+
     def test_configure_uses_selected_whitelisted_model(self) -> None:
         runner = FakeRunner()
         manager = CupsManager(runner)
@@ -71,6 +87,26 @@ class CupsManagerTests(unittest.TestCase):
         lpadmin = next(command for command in runner.commands if command[:2] == ["lpadmin", "-p"])
         self.assertIn("drv:///brlaser.drv/br1200.ppd", lpadmin)
         self.assertIn("usb://Brother/HL-1218W?serial=ABC", lpadmin)
+
+    def test_configure_resolves_catalog_model_without_accepting_a_path(self) -> None:
+        runner = FakeRunner()
+        manager = CupsManager(
+            runner,
+            catalog_model_provider=lambda model_id: {
+                "model_id": model_id,
+                "installed": True,
+                "cups_model": "drv:///brlaser.drv/br1200.ppd",
+            },
+        )
+        config = PhysicalPrinterConfig(
+            enabled=True,
+            queue_name="Catalog_Printer",
+            device_uri="usb://Brother/HL-1218W?serial=ABC",
+            driver_profile="catalog:model-safe123",
+        )
+        manager.configure(config)
+        lpadmin = next(command for command in runner.commands if command[:2] == ["lpadmin", "-p"])
+        self.assertIn("drv:///brlaser.drv/br1200.ppd", lpadmin)
 
 
 if __name__ == "__main__":

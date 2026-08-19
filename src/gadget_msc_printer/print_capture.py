@@ -218,6 +218,7 @@ class PrintCapture:
             "conversion_status": "pending" if self.converter else "disabled",
             "pdf_path": "",
             "conversion_error": "",
+            "conversion_skip_reason": "",
         }
         self._write_metadata(active.final_path, metadata)
         LOGGER.info(
@@ -268,10 +269,21 @@ class PrintCapture:
         if self.converter is None or not source.is_file():
             return
         metadata = self._read_metadata(source) or {}
+        ignore_reason = getattr(self.converter, "ignore_reason", None)
+        skip_reason = ignore_reason(source) if callable(ignore_reason) else ""
+        if skip_reason:
+            metadata["conversion_status"] = "ignored"
+            metadata["conversion_error"] = ""
+            metadata["conversion_skip_reason"] = skip_reason
+            metadata["conversion_duration_ms"] = 0.0
+            self._write_metadata(source, metadata)
+            LOGGER.info("print stream ignored: %s reason=%s", source, skip_reason)
+            return
         started_ns = time.monotonic_ns()
         metadata["conversion_started_at"] = _iso_utc(_utc_now())
         metadata["conversion_status"] = "running"
         metadata["conversion_error"] = ""
+        metadata["conversion_skip_reason"] = ""
         self._write_metadata(source, metadata)
         try:
             target = self.converter.convert(source, "print")
@@ -331,6 +343,7 @@ class PrintCapture:
                     "conversion_status": "pending" if self.converter else "disabled",
                     "pdf_path": "",
                     "conversion_error": "",
+                    "conversion_skip_reason": "",
                 }
                 self._write_metadata(final_path, metadata)
                 if self.converter:

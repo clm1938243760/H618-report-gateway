@@ -11,6 +11,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from scripts.build_company_update_zip import PAYLOAD_PATHS, include_file, payload_files
 from jvlei_update.company_package import verify_company_package
 from jvlei_update.package import PackageError, build_package, safe_extract_payload, verify_package
 
@@ -137,6 +138,15 @@ class CompanyUpdatePackageTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_release_payload_includes_only_the_driver_pack_public_key(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        relative_files = {path.relative_to(project_root).as_posix() for path in payload_files(project_root)}
+        self.assertIn("assets", PAYLOAD_PATHS)
+        self.assertIn("assets/driver-pack-public.pem", relative_files)
+        self.assertTrue(include_file(Path("assets/driver-pack-public.pem")))
+        self.assertFalse(include_file(Path("assets/driver-pack-private.pem")))
+        self.assertFalse(include_file(Path("secrets/release.key")))
 
     def build_package(
         self,

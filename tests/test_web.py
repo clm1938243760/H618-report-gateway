@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from gadget_msc_printer.auth import SessionStore
 from gadget_msc_printer.config import AppConfig, load_config, save_config
+from gadget_msc_printer.driver_catalog import DriverCatalogManager
 from gadget_msc_printer.driver_manager import DriverManager
 from gadget_msc_printer.maintenance import MaintenanceManager
 from gadget_msc_printer.report_info import ReportInfoManager
@@ -152,7 +153,7 @@ class FakeCupsManager:
         self.queue_enabled = True
         self.deleted = False
 
-    def status(self, config):
+    def status(self, config, scan_devices=True):
         configured = None
         if self.configured is not None and not self.deleted:
             configured = {
@@ -188,6 +189,9 @@ class FakeCupsManager:
             "configured_queue": configured,
             "default_queue": config.queue_name if configured else "",
         }
+
+    def invalidate_models_cache(self):
+        return None
 
     def configure(self, config):
         self.configured = config
@@ -336,6 +340,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.cups = FakeCupsManager()
         self.updater = FakeUpdaterClient()
         self.driver_manager = DriverManager(root=root / "drivers")
+        self.driver_catalog = DriverCatalogManager(root=root / "driver-catalog")
         self.web = ConfigWebApp(
             self.config_path,
             config,
@@ -346,6 +351,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             self.wifi,
             self.cups,
             driver_manager=self.driver_manager,
+            driver_catalog=self.driver_catalog,
             updater_client=self.updater,
         )
         self.client = TestClient(TestServer(self.web.app))
@@ -435,6 +441,34 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200, payload)
         self.assertTrue(payload["upload"]["analysis"]["supported"])
         self.assertEqual(payload["upload"]["analysis"]["source_type"], "ppd")
+
+    async def test_driver_catalog_requires_model_ids_and_records_manual_validation(self) -> None:
+        token, csrf = await self._login()
+        headers = {"Cookie": f"gmp_session={token}", "X-CSRF-Token": csrf}
+
+        response = await self.client.get(
+            "/api/driver-catalog?query=IPP&page=1&page_size=10",
+            headers=headers,
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(payload["items"][0]["model_id"], "generic-ipp-everywhere")
+
+        response = await self.client.post(
+            "/api/driver-validation",
+            headers=headers,
+            json={"model_id": "generic-ipp-everywhere", "result": "passed", "notes": "测试页正常"},
+        )
+        payload = await response.json()
+        self.assertEqual(response.status, 200, payload)
+        self.assertEqual(payload["validation"]["result"], "passed")
+
+        response = await self.client.post(
+            "/api/driver-packages/plan",
+            headers=headers,
+            json={"model_id": "printer-driver-brlaser;reboot"},
+        )
+        self.assertEqual(response.status, 400)
 
     async def test_wifi_status_scan_connect_disconnect_and_forget(self) -> None:
         token, csrf = await self._login()

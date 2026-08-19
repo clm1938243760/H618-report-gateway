@@ -38,9 +38,10 @@ if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-yaml python3-pil python3-aiohttp \
     dosfstools util-linux ghostscript openssl device-tree-compiler \
-    network-manager dnsmasq-base iptables \
+    network-manager dnsmasq-base iptables ipp-usb \
     cups cups-client cups-filters printer-driver-brlaser \
-    printer-driver-pxljr openprinting-ppds foomatic-db-compressed-ppds
+    printer-driver-pxljr printer-driver-foo2zjs \
+    openprinting-ppds foomatic-db-compressed-ppds
 fi
 
 if ! command -v gpcl6 >/dev/null 2>&1 && ! command -v pcl6 >/dev/null 2>&1; then
@@ -135,6 +136,11 @@ fi
 
 if [[ ! -s "$CONFIG_DIR/config.yaml" ]]; then
   install -m 0640 "$DEST/config.example.yaml" "$CONFIG_DIR/config.yaml"
+fi
+
+if [[ -s "$SRC/assets/driver-pack-public.pem" \
+  && ! -e "$CONFIG_DIR/driver-pack-public.pem" ]]; then
+  install -m 0644 "$SRC/assets/driver-pack-public.pem" "$CONFIG_DIR/driver-pack-public.pem"
 fi
 
 python3 - "$CONFIG_DIR/config.yaml" <<'PY'

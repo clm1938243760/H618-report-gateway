@@ -4,6 +4,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -65,10 +67,16 @@ class CupsManager:
         self,
         command_runner: CommandRunner | None = None,
         custom_profile_provider: Callable[[], list[dict[str, Any]]] | None = None,
+        catalog_model_provider: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self._using_default_runner = command_runner is None
         self.command_runner = command_runner or self._default_runner
         self.custom_profile_provider = custom_profile_provider
+        self.catalog_model_provider = catalog_model_provider
+        self._cache_lock = threading.RLock()
+        self._models_cache: list[dict[str, str]] = []
+        self._models_cached_at = 0.0
+        self._devices_cache: list[dict[str, str]] = []
 
     @staticmethod
     def _default_runner(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
@@ -126,7 +134,13 @@ class CupsManager:
                     "recommended_profile": self.recommend_profile(uri),
                 }
             )
+        with self._cache_lock:
+            self._devices_cache = [dict(item) for item in devices]
         return devices
+
+    def cached_devices(self) -> list[dict[str, str]]:
+        with self._cache_lock:
+            return [dict(item) for item in self._devices_cache]
 
     @staticmethod
     def recommend_profile(uri: str) -> str:
@@ -139,15 +153,25 @@ class CupsManager:
             return "ipp_everywhere"
         return ""
 
-    def installed_models(self) -> list[dict[str, str]]:
-        output = self._run(["lpinfo", "-m"], timeout=60)
-        models: list[dict[str, str]] = []
-        for line in output.splitlines():
-            parts = line.strip().split(maxsplit=1)
-            if not parts:
-                continue
-            models.append({"model": parts[0], "label": parts[1] if len(parts) > 1 else parts[0]})
-        return models
+    def installed_models(self, force: bool = False) -> list[dict[str, str]]:
+        with self._cache_lock:
+            if not force and self._models_cache and time.monotonic() - self._models_cached_at < 300:
+                return [dict(item) for item in self._models_cache]
+            output = self._run(["lpinfo", "-m"], timeout=60)
+            models: list[dict[str, str]] = []
+            for line in output.splitlines():
+                parts = line.strip().split(maxsplit=1)
+                if not parts:
+                    continue
+                models.append({"model": parts[0], "label": parts[1] if len(parts) > 1 else parts[0]})
+            self._models_cache = models
+            self._models_cached_at = time.monotonic()
+            return [dict(item) for item in models]
+
+    def invalidate_models_cache(self) -> None:
+        with self._cache_lock:
+            self._models_cache = []
+            self._models_cached_at = 0.0
 
     def driver_profiles(self) -> list[dict[str, Any]]:
         models = self.installed_models()
@@ -201,6 +225,17 @@ class CupsManager:
         return profiles
 
     def _model_for_profile(self, profile: str) -> tuple[str, bool]:
+        if profile.startswith("catalog:"):
+            if self.catalog_model_provider is None:
+                raise CupsError("driver catalog is unavailable")
+            try:
+                selected = self.catalog_model_provider(profile.split(":", 1)[1])
+            except Exception as exc:
+                raise CupsError(str(exc)) from exc
+            model = str(selected.get("cups_model", ""))
+            if not selected.get("installed") or not model:
+                raise CupsError("selected catalog driver is not installed or has no CUPS model")
+            return model, False
         selected = next((item for item in self.driver_profiles() if item["value"] == profile), None)
         if selected is None:
             raise CupsError("unsupported physical printer driver profile")
@@ -235,7 +270,7 @@ class CupsManager:
             )
         return queues
 
-    def status(self, config: PhysicalPrinterConfig) -> dict[str, Any]:
+    def status(self, config: PhysicalPrinterConfig, scan_devices: bool = True) -> dict[str, Any]:
         if not self.available():
             return {
                 "available": False,
@@ -252,7 +287,7 @@ class CupsManager:
             default_output = self._run_optional(["lpstat", "-d"], timeout=20)
             default_queue = default_output.split(":", 1)[1].strip() if ":" in default_output else ""
             queues = self.queues()
-            devices = self.discover_devices()
+            devices = self.discover_devices() if scan_devices else self.cached_devices()
             profiles = self.driver_profiles()
             configured = next((item for item in queues if item["name"] == config.queue_name), None)
             return {

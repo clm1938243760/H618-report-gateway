@@ -12,6 +12,7 @@ from aiohttp import web
 from .auth import SessionStore
 from .config import load_config
 from .cups_manager import CupsManager
+from .driver_catalog import DriverCatalogManager
 from .driver_manager import DriverManager
 from .maintenance import MaintenanceManager
 from .physical_print import PhysicalPrintWorker
@@ -35,6 +36,11 @@ async def main_async() -> None:
     uploader = ReportUploadWorker(config.upload, config.pdf, report_info)
     driver_manager = DriverManager()
     cups = CupsManager(custom_profile_provider=driver_manager.profiles)
+    driver_catalog = DriverCatalogManager(
+        model_provider=cups.installed_models,
+        model_cache_invalidator=cups.invalidate_models_cache,
+    )
+    cups.catalog_model_provider = driver_catalog.get_model
     physical_printer = PhysicalPrintWorker(config.physical_printer, config.pdf, cups)
     maintenance = MaintenanceManager(
         config.cleanup,
@@ -54,6 +60,7 @@ async def main_async() -> None:
         cups=cups,
         physical_printer=physical_printer,
         driver_manager=driver_manager,
+        driver_catalog=driver_catalog,
     )
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(config.web.tls_cert, config.web.tls_key)
@@ -80,6 +87,7 @@ async def main_async() -> None:
     maintenance_task = asyncio.create_task(maintenance.run())
     hotspot_task = asyncio.create_task(application.monitor_hotspot())
     physical_print_task = asyncio.create_task(physical_printer.run())
+    driver_catalog_task = asyncio.create_task(asyncio.to_thread(driver_catalog.refresh, False))
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -97,6 +105,7 @@ async def main_async() -> None:
         maintenance_task,
         hotspot_task,
         physical_print_task,
+        driver_catalog_task,
         return_exceptions=True,
     )
     await runner.cleanup()

@@ -56,7 +56,7 @@
         <el-table-column prop="connection" label="连接方式" width="110" />
         <el-table-column prop="uri" label="设备 URI" min-width="390" show-overflow-tooltip />
         <el-table-column label="推荐驱动" width="220">
-          <template #default="{ row }">{{ profileLabel(row.recommended_profile) || "请按设备型号选择" }}</template>
+          <template #default="{ row }">{{ recommendedLabel(row) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
@@ -79,7 +79,7 @@
             <dt>设备 URI</dt>
             <dd>{{ row.uri }}</dd>
             <dt>推荐驱动</dt>
-            <dd>{{ profileLabel(row.recommended_profile) || "请按设备型号选择" }}</dd>
+            <dd>{{ recommendedLabel(row) }}</dd>
           </dl>
           <div class="mobile-record-actions">
             <el-button type="primary" @click="selectDevice(row)">选择此打印机</el-button>
@@ -87,6 +87,92 @@
         </article>
         <el-empty v-if="cups.devices.length === 0" description="未发现实体打印机" :image-size="70" />
       </div>
+    </section>
+
+    <section class="surface driver-catalog-surface">
+      <div class="surface-heading">
+        <div>
+          <h2>选择实体打印机型号</h2>
+          <p class="section-note">型号目录来自 Ubuntu Noble ARM64 软件源；选择型号只生成受控安装计划，不执行网页输入的命令。</p>
+        </div>
+        <el-tag effect="plain">{{ catalog.total }} 个型号</el-tag>
+      </div>
+      <div class="catalog-toolbar">
+        <el-input
+          v-model.trim="catalogQuery"
+          clearable
+          :prefix-icon="Search"
+          placeholder="输入厂商或型号，例如 Brother HL-1218W"
+          @keyup.enter="searchCatalog(1)"
+        />
+        <el-select v-model="catalogVendor" clearable filterable placeholder="全部厂商">
+          <el-option v-for="vendor in catalog.vendors" :key="vendor" :label="vendor" :value="vendor" />
+        </el-select>
+        <el-select v-model="catalogStatus" clearable placeholder="全部状态">
+          <el-option label="已实机验证" value="verified" />
+          <el-option label="已安装" value="installed" />
+          <el-option label="软件源可用" value="available" />
+          <el-option label="不可用" value="unavailable" />
+          <el-option label="通用驱动" value="generic" />
+        </el-select>
+        <el-button type="primary" :icon="Search" :loading="catalogLoading" @click="searchCatalog(1)">查询</el-button>
+      </div>
+
+      <el-alert
+        v-if="selectedCatalogModel"
+        :title="`已选：${selectedCatalogModel.manufacturer} ${selectedCatalogModel.model}`"
+        :description="selectedCatalogModel.installed ? '驱动已安装，保存配置时将创建或更新CUPS队列。' : '该驱动尚未安装，请先生成安装计划。'"
+        :type="selectedCatalogModel.installed ? 'success' : 'warning'"
+        :closable="false"
+        show-icon
+        class="catalog-selection-alert"
+      />
+
+      <el-table :data="catalog.items" stripe max-height="390" class="desktop-only" v-loading="catalogLoading">
+        <el-table-column label="厂商/型号" min-width="290" show-overflow-tooltip>
+          <template #default="{ row }"><strong>{{ row.manufacturer }}</strong> {{ row.model }}</template>
+        </el-table-column>
+        <el-table-column label="协议" min-width="155" show-overflow-tooltip>
+          <template #default="{ row }">{{ (row.protocols || []).join("、") }}</template>
+        </el-table-column>
+        <el-table-column prop="package_name" label="软件包" min-width="190" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.package_name || "系统通用" }}</template>
+        </el-table-column>
+        <el-table-column label="等级" width="125">
+          <template #default="{ row }"><el-tag :type="verificationType(row)" effect="light">{{ verificationLabel(row) }}</el-tag></template>
+        </el-table-column>
+        <el-table-column label="状态" width="105">
+          <template #default="{ row }">{{ row.installed ? "已安装" : row.available ? "可下载" : "不可用" }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="112" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" :disabled="!row.available" @click="chooseOrPlan(row)">
+              {{ row.installed && row.cups_model ? "选择" : "安装" }}
+            </el-button>
+          </template>
+        </el-table-column>
+        <template #empty><el-empty description="没有匹配的打印机型号" :image-size="70" /></template>
+      </el-table>
+
+      <div class="mobile-only mobile-record-list compact-record-list">
+        <article v-for="row in catalog.items" :key="row.model_id" class="mobile-record">
+          <div class="mobile-record-heading">
+            <div><strong>{{ row.manufacturer }} {{ row.model }}</strong><span>{{ row.package_name || "系统通用" }}</span></div>
+            <el-tag :type="verificationType(row)" effect="light">{{ verificationLabel(row) }}</el-tag>
+          </div>
+          <dl class="mobile-record-meta"><dt>协议</dt><dd>{{ (row.protocols || []).join("、") }}</dd><dt>状态</dt><dd>{{ row.installed ? "已安装" : row.available ? "可下载" : "不可用" }}</dd></dl>
+          <div class="mobile-record-actions"><el-button type="primary" plain :disabled="!row.available" @click="chooseOrPlan(row)">{{ row.installed && row.cups_model ? "选择驱动" : "查看安装计划" }}</el-button></div>
+        </article>
+      </div>
+      <el-pagination
+        v-if="catalog.total > catalog.page_size"
+        v-model:current-page="catalog.page"
+        :page-size="catalog.page_size"
+        :total="catalog.total"
+        layout="prev, pager, next, total"
+        class="catalog-pagination"
+        @current-change="searchCatalog"
+      />
     </section>
 
     <el-form ref="formRef" :model="form" label-position="top">
@@ -120,6 +206,11 @@
           </el-form-item>
           <el-form-item label="打印机驱动" prop="driver_profile">
             <el-select v-model="form.driver_profile" :disabled="!form.enabled" style="width: 100%">
+              <el-option
+                v-if="selectedCatalogModel?.installed && selectedCatalogModel?.cups_model"
+                :label="`${selectedCatalogModel.manufacturer} ${selectedCatalogModel.model}`"
+                :value="`catalog:${selectedCatalogModel.model_id}`"
+              />
               <el-option
                 v-for="profile in cups.profiles"
                 :key="profile.value"
@@ -166,6 +257,20 @@
         </div>
         <div class="physical-queue-actions">
           <el-button :disabled="!configuredQueue" :loading="actionLoading === 'test'" @click="testPrint">打印测试页</el-button>
+          <el-button
+            v-if="selectedCatalogModel"
+            type="success"
+            plain
+            :loading="validationLoading === 'passed'"
+            @click="validateSelectedDriver('passed')"
+          >内容正常</el-button>
+          <el-button
+            v-if="selectedCatalogModel"
+            type="warning"
+            plain
+            :loading="validationLoading === 'failed'"
+            @click="validateSelectedDriver('failed')"
+          >内容异常</el-button>
           <el-button
             v-if="configuredQueue?.enabled"
             :disabled="!configuredQueue"
@@ -226,12 +331,32 @@
         <el-empty v-if="autoPrint.recent.length === 0" description="暂无自动打印任务" :image-size="70" />
       </div>
     </section>
+
+    <el-dialog v-model="planDialogVisible" title="驱动安装计划" width="620px" destroy-on-close>
+      <el-descriptions v-if="installPlan" :column="1" border>
+        <el-descriptions-item label="型号">{{ installPlan.model?.manufacturer }} {{ installPlan.model?.model }}</el-descriptions-item>
+        <el-descriptions-item label="软件包">{{ installPlan.package_name || "无需安装" }}</el-descriptions-item>
+        <el-descriptions-item label="候选版本">{{ installPlan.candidate_version || "已安装" }}</el-descriptions-item>
+        <el-descriptions-item label="安装来源">{{ installPlan.source === "offline" ? "JVLEI离线驱动包" : installPlan.source === "installed" ? "系统已安装" : "Ubuntu Noble软件源" }}</el-descriptions-item>
+        <el-descriptions-item label="依赖">{{ (installPlan.dependencies || []).join("、") || "无新增依赖" }}</el-descriptions-item>
+        <el-descriptions-item label="下载量">{{ formatBytes(installPlan.download_bytes) }}</el-descriptions-item>
+        <el-descriptions-item label="新增占用">{{ formatBytes(installPlan.install_bytes) }}</el-descriptions-item>
+        <el-descriptions-item label="可用空间">{{ formatBytes(installPlan.free_bytes) }}</el-descriptions-item>
+      </el-descriptions>
+      <el-progress v-if="installJob && !jobFinished" :percentage="jobPercentage" :indeterminate="installJob.state === 'installing'" class="catalog-job-progress" />
+      <p v-if="installJob" :class="installJob.state === 'failed' ? 'error-text' : 'section-note'">{{ installJob.summary }}</p>
+      <template #footer>
+        <el-button @click="planDialogVisible = false">关闭</el-button>
+        <el-button v-if="installPlan?.required && !installJob" type="primary" :loading="installStarting" @click="startDriverInstall">确认下载并安装</el-button>
+        <el-button v-if="installJob?.state === 'completed'" type="primary" @click="finishInstalledDriver">返回选择型号</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
-import { DocumentChecked, Refresh } from "@element-plus/icons-vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { DocumentChecked, Refresh, Search } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, errorMessage } from "@/api/client";
 
@@ -240,6 +365,17 @@ const loading = ref(false);
 const scanning = ref(false);
 const saving = ref(false);
 const actionLoading = ref("");
+const catalogLoading = ref(false);
+const catalogQuery = ref("");
+const catalogVendor = ref("");
+const catalogStatus = ref("");
+const selectedCatalogModel = ref(null);
+const installPlan = ref(null);
+const installJob = ref(null);
+const installStarting = ref(false);
+const validationLoading = ref("");
+const planDialogVisible = ref(false);
+let jobTimer = 0;
 const form = reactive({
   enabled: false,
   auto_print: false,
@@ -261,8 +397,11 @@ const cups = reactive({
   default_queue: "",
   configured_queue: null
 });
+const catalog = reactive({ items: [], total: 0, page: 1, page_size: 30, vendors: [], updated_at: 0 });
 const autoPrint = reactive({ counts: {}, recent: [] });
 const configuredQueue = computed(() => cups.configured_queue || cups.queues.find((item) => item.name === form.queue_name));
+const jobFinished = computed(() => ["completed", "failed"].includes(installJob.value?.state));
+const jobPercentage = computed(() => ({ queued: 5, resolving: 18, downloading: 40, installing: 68, indexing: 88, completed: 100, failed: 100 }[installJob.value?.state] || 0));
 const queueRules = [
   { required: true, message: "请输入队列名称", trigger: "blur" },
   { pattern: /^[A-Za-z0-9._-]{1,64}$/, message: "只能使用英文字母、数字、点、下划线和短横线", trigger: "blur" }
@@ -282,6 +421,7 @@ function applyPayload(data) {
     ...(data.cups || {})
   });
   Object.assign(autoPrint, { counts: {}, recent: [], ...(data.auto_print || {}) });
+  if (data.cups?.selected_catalog_model) selectedCatalogModel.value = data.cups.selected_catalog_model;
 }
 
 async function loadConfig() {
@@ -311,9 +451,109 @@ async function scanDevices() {
 
 function selectDevice(row) {
   form.device_uri = row.uri;
-  if (row.recommended_profile) form.driver_profile = row.recommended_profile;
+  const recommendation = row.catalog_recommendations?.[0];
+  if (recommendation) {
+    selectedCatalogModel.value = recommendation;
+    form.driver_profile = recommendation.installed && recommendation.cups_model
+      ? `catalog:${recommendation.model_id}`
+      : "";
+  } else if (row.recommended_profile) {
+    form.driver_profile = row.recommended_profile;
+  }
   form.enabled = true;
-  ElMessage.success(`已选择 ${row.label}`);
+  ElMessage.success(recommendation ? `已选择 ${row.label}，推荐 ${recommendation.model}` : `已选择 ${row.label}`);
+}
+
+async function searchCatalog(page = 1) {
+  catalogLoading.value = true;
+  try {
+    const { data } = await api.get("/api/driver-catalog", {
+      params: {
+        query: catalogQuery.value,
+        vendor: catalogVendor.value,
+        status: catalogStatus.value,
+        page,
+        page_size: catalog.page_size
+      }
+    });
+    Object.assign(catalog, data.summary || {}, {
+      items: data.items || [],
+      total: data.total || 0,
+      page: data.page || 1,
+      page_size: data.page_size || 30
+    });
+  } catch (error) {
+    ElMessage.error(errorMessage(error, "读取打印机型号目录失败"));
+  } finally {
+    catalogLoading.value = false;
+  }
+}
+
+async function chooseOrPlan(row) {
+  selectedCatalogModel.value = row;
+  if (row.installed && row.cups_model) {
+    form.driver_profile = `catalog:${row.model_id}`;
+    form.enabled = true;
+    ElMessage.success("驱动已选择，请确认队列参数后保存应用");
+    return;
+  }
+  installPlan.value = null;
+  installJob.value = null;
+  try {
+    const { data } = await api.post("/api/driver-packages/plan", { model_id: row.model_id }, { timeout: 3 * 60 * 1000 });
+    installPlan.value = data.plan;
+    planDialogVisible.value = true;
+  } catch (error) {
+    ElMessage.error(errorMessage(error, "生成驱动安装计划失败"));
+  }
+}
+
+async function startDriverInstall() {
+  if (!installPlan.value?.model?.model_id || installStarting.value) return;
+  installStarting.value = true;
+  try {
+    const { data } = await api.post("/api/driver-packages/install", { model_id: installPlan.value.model.model_id });
+    installJob.value = data.job;
+    pollInstallJob();
+  } catch (error) {
+    ElMessage.error(errorMessage(error, "启动驱动安装失败"));
+  } finally {
+    installStarting.value = false;
+  }
+}
+
+async function pollInstallJob() {
+  window.clearTimeout(jobTimer);
+  if (!installJob.value?.job_id || jobFinished.value) return;
+  try {
+    const { data } = await api.get(`/api/driver-jobs/${installJob.value.job_id}`);
+    installJob.value = data.job;
+    if (installJob.value.state === "completed") {
+      ElMessage.success("驱动安装完成，请选择具体型号并创建队列");
+      await searchCatalog(catalog.page);
+      return;
+    }
+    if (installJob.value.state === "failed") {
+      ElMessage.error(installJob.value.summary || "驱动安装失败");
+      return;
+    }
+  } catch (error) {
+    ElMessage.error(errorMessage(error, "读取驱动安装进度失败"));
+    return;
+  }
+  jobTimer = window.setTimeout(pollInstallJob, 1200);
+}
+
+async function finishInstalledDriver() {
+  planDialogVisible.value = false;
+  await searchCatalog(1);
+  const original = installPlan.value?.model;
+  const refreshed = catalog.items.find((item) => item.model_id === original?.model_id);
+  if (refreshed?.installed && refreshed.cups_model) {
+    selectedCatalogModel.value = refreshed;
+    form.driver_profile = `catalog:${refreshed.model_id}`;
+    form.enabled = true;
+  }
 }
 
 function onEnabledChange(value) {
@@ -353,6 +593,42 @@ async function testPrint() {
   }
 }
 
+async function validateSelectedDriver(result) {
+  const modelId = selectedCatalogModel.value?.model_id;
+  if (!modelId || validationLoading.value) return;
+  let notes = "测试页文字、图形和分页正常";
+  try {
+    if (result === "failed") {
+      const response = await ElMessageBox.prompt(
+        "请简要说明乱码、缺页、尺寸或颜色等异常，方便后续排查。",
+        "记录测试异常",
+        { confirmButtonText: "保存记录", cancelButtonText: "取消", inputType: "textarea", inputValidator: (value) => Boolean(String(value || "").trim()) || "请输入异常说明" }
+      );
+      notes = String(response.value || "").trim();
+    } else {
+      await ElMessageBox.confirm(
+        "请确认实体打印机已经实际出纸，并且文字、图形、分页均正常。",
+        "确认实机验证",
+        { type: "success", confirmButtonText: "确认正常", cancelButtonText: "取消" }
+      );
+    }
+  } catch {
+    return;
+  }
+  validationLoading.value = result;
+  try {
+    await api.post("/api/driver-validation", { model_id: modelId, result, notes });
+    ElMessage.success(result === "passed" ? "已标记为实机验证通过" : "已记录实机测试异常");
+    await searchCatalog(catalog.page);
+    const refreshed = catalog.items.find((item) => item.model_id === modelId);
+    if (refreshed) selectedCatalogModel.value = refreshed;
+  } catch (error) {
+    ElMessage.error(errorMessage(error, "保存实机验证结果失败"));
+  } finally {
+    validationLoading.value = "";
+  }
+}
+
 async function controlQueue(action) {
   actionLoading.value = action;
   try {
@@ -389,6 +665,25 @@ function profileLabel(value) {
   return cups.profiles.find((item) => item.value === value)?.label || "";
 }
 
+function recommendedLabel(row) {
+  return row.catalog_recommendations?.[0]?.model || profileLabel(row.recommended_profile) || "请按设备型号选择";
+}
+
+function verificationLabel(row) {
+  return { verified: "已实机验证", generic: "通用驱动", repository: "软件源支持", custom: "现场导入" }[row.verification] || "未验证";
+}
+
+function verificationType(row) {
+  return row.verification === "verified" ? "success" : row.verification === "generic" ? "primary" : row.available ? "info" : "warning";
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function fileName(path) {
   return String(path || "").split(/[\\/]/).pop() || "-";
 }
@@ -413,5 +708,26 @@ function jobType(value) {
   return value === "submitted" ? "success" : value === "exhausted" ? "danger" : value === "retry_wait" ? "warning" : "info";
 }
 
-onMounted(loadConfig);
+onMounted(async () => {
+  await Promise.all([loadConfig(), searchCatalog(1)]);
+});
+onBeforeUnmount(() => window.clearTimeout(jobTimer));
 </script>
+
+<style scoped lang="scss">
+.surface-heading > div { min-width: 0; }
+.surface-heading .section-note { display: block; margin: 6px 0 0; line-height: 1.5; }
+.catalog-toolbar {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) 180px 160px auto;
+  gap: 10px;
+  margin: 14px 0;
+}
+.catalog-selection-alert { margin-bottom: 14px; }
+.catalog-pagination { justify-content: flex-end; margin-top: 14px; }
+.catalog-job-progress { margin-top: 18px; }
+@media (max-width: 900px) {
+  .catalog-toolbar { grid-template-columns: 1fr; }
+  .catalog-pagination { justify-content: center; overflow-x: auto; }
+}
+</style>

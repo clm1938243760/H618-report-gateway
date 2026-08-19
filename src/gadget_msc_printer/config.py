@@ -38,9 +38,11 @@ def is_supported_physical_printer_driver(profile: str) -> bool:
     layer resolves it through the reviewed local driver registry before use.
     """
 
-    return profile in PHYSICAL_PRINTER_DRIVER_PROFILES or re.fullmatch(
-        r"custom:[a-z0-9][a-z0-9._-]{0,127}", profile
-    ) is not None
+    return (
+        profile in PHYSICAL_PRINTER_DRIVER_PROFILES
+        or re.fullmatch(r"custom:[a-z0-9][a-z0-9._-]{0,127}", profile) is not None
+        or re.fullmatch(r"catalog:[a-z0-9][a-z0-9._-]{1,127}", profile) is not None
+    )
 FIXED_PRINTER_VENDOR_ID = "0x0525"
 FIXED_PRINTER_PRODUCT_ID = "0xa4a8"
 FIXED_PRINTER_MANUFACTURER = "JVLEI"
@@ -219,6 +221,7 @@ class PdfConfig:
     output_dir: str = "/var/lib/gadget-msc-printer/reports_pdf"
     ghostpcl: list[str] = field(default_factory=lambda: ["gpcl6", "pcl6"])
     ps2pdf: str = "ps2pdf"
+    zjsdecode: str = "zjsdecode"
 
 
 @dataclass

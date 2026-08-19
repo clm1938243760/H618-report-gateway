@@ -239,6 +239,11 @@ if command -v gpcl6 >/dev/null 2>&1 || command -v pcl6 >/dev/null 2>&1; then
 else
   warn "GhostPCL is missing; PCL/PCL XL conversion is not ready"
 fi
+if command -v zjsdecode >/dev/null 2>&1; then
+  pass "ZjStream decoder is available"
+else
+  warn "zjsdecode is missing; ZjStream conversion is not ready"
+fi
 
 if command -v lpstat >/dev/null 2>&1 && systemctl is-active --quiet cups.service; then
   pass "CUPS physical printer service is available"

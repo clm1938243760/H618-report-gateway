@@ -170,6 +170,8 @@
         <dd>{{ formatDateTime(selectedJob.pdf_ready_at) }}</dd>
         <dt v-if="selectedJob.conversion_error">转换错误</dt>
         <dd v-if="selectedJob.conversion_error" class="detail-block">{{ selectedJob.conversion_error }}</dd>
+        <dt v-if="selectedJob.conversion_skip_reason">忽略原因</dt>
+        <dd v-if="selectedJob.conversion_skip_reason" class="detail-block">{{ selectedJob.conversion_skip_reason }}</dd>
         <dt>PJL 声明语言</dt>
         <dd>{{ selectedJob.declared_language || "未声明" }}</dd>
         <dt>处理方式</dt>
@@ -196,7 +198,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { DocumentChecked, Download, Refresh, View } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, errorMessage } from "@/api/client";
@@ -209,6 +211,9 @@ const analysisLoading = ref(false);
 const jobs = ref([]);
 const analysisVisible = ref(false);
 const selectedJob = ref(null);
+const ANALYSIS_REFRESH_MS = 5000;
+let analysisRefreshTimer = null;
+let analysisRequestPending = false;
 const form = reactive({
   driver_profile: "universal",
   driver_profiles: [],
@@ -232,15 +237,19 @@ async function loadConfig() {
   Object.assign(form, data);
 }
 
-async function loadAnalysis() {
-  analysisLoading.value = true;
+async function loadAnalysis(options = {}) {
+  const silent = options?.silent === true;
+  if (analysisRequestPending) return;
+  analysisRequestPending = true;
+  if (!silent) analysisLoading.value = true;
   try {
     const { data } = await api.get("/api/printer/analysis", { params: { limit: 30 } });
     jobs.value = data.jobs || [];
   } catch (error) {
-    ElMessage.error(errorMessage(error, "加载打印流分析失败"));
+    if (!silent) ElMessage.error(errorMessage(error, "加载打印流分析失败"));
   } finally {
-    analysisLoading.value = false;
+    analysisRequestPending = false;
+    if (!silent) analysisLoading.value = false;
   }
 }
 
@@ -322,5 +331,20 @@ function formatDuration(value) {
   return `${(milliseconds / 1000).toFixed(3)} s`;
 }
 
-onMounted(loadAll);
+function refreshVisibleAnalysis() {
+  if (!document.hidden && !analysisVisible.value) {
+    void loadAnalysis({ silent: true });
+  }
+}
+
+onMounted(async () => {
+  await loadAll();
+  analysisRefreshTimer = window.setInterval(refreshVisibleAnalysis, ANALYSIS_REFRESH_MS);
+  document.addEventListener("visibilitychange", refreshVisibleAnalysis);
+});
+
+onBeforeUnmount(() => {
+  if (analysisRefreshTimer !== null) window.clearInterval(analysisRefreshTimer);
+  document.removeEventListener("visibilitychange", refreshVisibleAnalysis);
+});
 </script>

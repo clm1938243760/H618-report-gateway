@@ -62,7 +62,7 @@
             {{ item.label }}
           </router-link>
         </div>
-        <main class="gateway-content">
+        <main ref="contentRef" class="gateway-content">
           <router-view />
         </main>
       </section>
@@ -121,13 +121,15 @@ import {
   SwitchButton,
   UserFilled
 } from "@element-plus/icons-vue";
-import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { nextTick, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { useSessionStore } from "@/stores/session";
 
 const router = useRouter();
+const route = useRoute();
 const session = useSessionStore();
 const mobileNavOpen = ref(false);
+const contentRef = ref(null);
 
 const navigation = [
   { path: "/config", label: "配置管理", icon: Setting },
@@ -140,6 +142,14 @@ const navigation = [
   { path: "/maintenance", label: "存储与清理", icon: Clock },
   { path: "/update", label: "软件升级", icon: Download }
 ];
+
+watch(
+  () => route.fullPath,
+  async () => {
+    await nextTick();
+    contentRef.value?.scrollTo({ top: 0, left: 0 });
+  }
+);
 
 async function handleUserCommand(command) {
   if (command === "logout") {

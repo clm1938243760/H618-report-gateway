@@ -12,6 +12,11 @@ from PIL import Image, ImageDraw, ImageFont
 from .config import PdfConfig
 
 LOGGER = logging.getLogger(__name__)
+ZJSTREAM_MAGIC = b"JZJZ"
+ACL_FIRMWARE_MARKER = b"AGIACLDOWNLOAD"
+ZJSTREAM_PROBE_BYTES = 1024 * 1024
+MAX_ZJSTREAM_PAGES = 100
+MAX_ZJSTREAM_PAGE_PIXELS = 200_000_000
 
 
 class PdfConverter:
@@ -27,12 +32,20 @@ class PdfConverter:
         if not path.is_file():
             LOGGER.warning("source missing: %s", path)
             return None
+        ignored = self.ignore_reason(path)
+        if ignored:
+            LOGGER.info("ignore non-report print stream: %s reason=%s", path, ignored)
+            return None
         target = self._target_path(path, source_type)
         try:
             if self._is_pdf(path):
                 # FAT timestamps are local-time values and can appear hours in the
                 # future on a UTC board. The generated report must use board time.
                 shutil.copyfile(path, target)
+            elif self._is_zjstream(path):
+                if not self._zjstream_to_pdf(path, target):
+                    target.unlink(missing_ok=True)
+                    return None
             elif self._is_pcl(path) and self._pcl_to_pdf(path, target):
                 pass
             elif self._is_postscript(path) and self._ps_to_pdf(path, target):
@@ -51,6 +64,12 @@ class PdfConverter:
             target.unlink(missing_ok=True)
             LOGGER.exception("pdf conversion failed: %s", path)
             return None
+
+    def ignore_reason(self, source: str | Path) -> str:
+        path = Path(source)
+        if path.is_file() and ACL_FIRMWARE_MARKER in self._probe(path).upper():
+            return "HP ACL firmware/initialization stream"
+        return ""
 
     def _target_path(self, source: Path, source_type: str) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -74,6 +93,75 @@ class PdfConverter:
             or b"\x1b*t" in head
             or b"\x1b*b" in head
         )
+
+    def _is_zjstream(self, path: Path) -> bool:
+        return ZJSTREAM_MAGIC in self._probe(path)
+
+    def _probe(self, path: Path) -> bytes:
+        with path.open("rb") as handle:
+            return handle.read(ZJSTREAM_PROBE_BYTES)
+
+    def _zjstream_to_pdf(self, source: Path, target: Path) -> bool:
+        decoder = shutil.which(self.config.zjsdecode)
+        if not decoder:
+            LOGGER.warning("zjsdecode is not installed; cannot convert %s", source)
+            return False
+        marker_offset = self._probe(source).find(ZJSTREAM_MAGIC)
+        if marker_offset < 0:
+            return False
+
+        with tempfile.TemporaryDirectory(prefix="jvlei-zjs-") as directory:
+            work = Path(directory)
+            stream = work / "stream.zjs"
+            page_prefix = work / "page"
+            with source.open("rb") as source_handle, stream.open("wb") as stream_handle:
+                source_handle.seek(marker_offset)
+                shutil.copyfileobj(source_handle, stream_handle)
+
+            with stream.open("rb") as stream_handle:
+                result = subprocess.run(
+                    [decoder, "-d", str(page_prefix)],
+                    stdin=stream_handle,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120,
+                )
+            if result.returncode != 0:
+                LOGGER.warning("zjsdecode failed: %s", result.stderr[-1000:])
+                return False
+
+            page_paths = sorted(work.glob("page-*-*.pbm"))
+            if not page_paths or len(page_paths) > MAX_ZJSTREAM_PAGES:
+                LOGGER.warning("zjsdecode produced an invalid page count: %d", len(page_paths))
+                return False
+
+            pages: list[Image.Image] = []
+            page_numbers: set[str] = set()
+            try:
+                for page_path in page_paths:
+                    parts = page_path.stem.rsplit("-", 2)
+                    page_number = parts[-2] if len(parts) == 3 else page_path.stem
+                    if page_number in page_numbers:
+                        LOGGER.warning("multi-plane color ZjStream is not supported: %s", source)
+                        return False
+                    page_numbers.add(page_number)
+                    with Image.open(page_path) as image:
+                        if image.width * image.height > MAX_ZJSTREAM_PAGE_PIXELS:
+                            LOGGER.warning("ZjStream page dimensions are too large: %s", image.size)
+                            return False
+                        pages.append(image.copy())
+                pages[0].save(
+                    target,
+                    "PDF",
+                    resolution=600.0,
+                    save_all=True,
+                    append_images=pages[1:],
+                )
+            finally:
+                for page in pages:
+                    page.close()
+            return target.is_file() and target.stat().st_size > 0
 
     def _pcl_to_pdf(self, source: Path, target: Path) -> bool:
         for command in self.config.ghostpcl:

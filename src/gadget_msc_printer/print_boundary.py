@@ -10,7 +10,7 @@ PDF_HEADER = b"%PDF-"
 POSTSCRIPT_HEADER = b"%!"
 BOUNDARY_GRACE_NS = 200_000_000
 PROBE_LIMIT = 64 * 1024
-SUPPORTED_BOUNDARY_PROTOCOLS = ("PJL", "PCL", "PCL XL", "PostScript", "PDF")
+SUPPORTED_BOUNDARY_PROTOCOLS = ("PJL", "PCL", "PCL XL", "PostScript", "PDF", "ZjStream")
 
 
 @dataclass(frozen=True)
@@ -125,9 +125,13 @@ class PrintBoundaryDetector:
     def _append_probe(self, byte: int) -> None:
         if len(self._probe) < PROBE_LIMIT:
             self._probe.append(byte)
+        probe = bytes(self._probe)
+        upper = probe.upper()
+        if b"AGIACLDOWNLOAD" in upper:
+            self.protocol = "hp_acl_firmware"
+            return
         if self.protocol != "unknown":
             return
-        probe = bytes(self._probe)
         if probe.startswith(PDF_HEADER) or (
             self.total_bytes <= 256 and probe.endswith(PDF_HEADER)
         ):
@@ -136,6 +140,8 @@ class PrintBoundaryDetector:
             self.total_bytes <= 256 and probe.endswith(POSTSCRIPT_HEADER)
         ):
             self.protocol = "postscript"
+        elif probe.startswith(b"JZJZ") or probe.endswith(b"JZJZ"):
+            self.protocol = "zjstream"
 
     def _consume_control_byte(self, byte: int, now_ns: int) -> str:
         if self._pending and self._pending.protocol in {"pdf", "postscript"}:
@@ -239,6 +245,8 @@ class PrintBoundaryDetector:
                     self.protocol = "pcl"
                 elif language in {b"POSTSCRIPT", b"PS"}:
                     self.protocol = "postscript"
+                elif language == b"ACL":
+                    self.protocol = "zjstream"
             self._pjl_mode = False
             self._seen_payload = True
         if re.search(rb"\bEOJ(?:\s|$)", line):

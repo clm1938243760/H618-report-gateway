@@ -47,6 +47,20 @@ class PrnAnalyzerTests(unittest.TestCase):
         self.assertEqual(result["protocol"], "unknown")
         self.assertEqual(result["confidence"], "low")
 
+    def test_detects_zjstream_and_hp_acl_firmware(self) -> None:
+        samples = {
+            "zjstream": b"\x1b%-12345X@PJL JOB\r\nJZJZpage-data",
+            "hp_acl_firmware": b"JZJZ\x00agiACLDownload\x00HP LaserJet 1020",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for expected, content in samples.items():
+                with self.subTest(expected=expected):
+                    path = Path(directory) / f"{expected}.prn"
+                    path.write_bytes(content)
+                    result = analyze_prn(path)
+                    self.assertEqual(result["protocol"], expected)
+                    self.assertEqual(result["confidence"], "high")
+
     def test_recent_analysis_is_limited_to_prn_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -1,7 +1,9 @@
 [Unit]
 Description=KICKPI K2B report gateway HTTPS configuration and upload service
-After=NetworkManager.service network.target network-online.target local-fs.target jvlei-updater.service
-Wants=NetworkManager.service network-online.target jvlei-updater.service
+# The HTTPS listener can bind before an interface receives an address. Keep the
+# update agent parallel so network-online delays never block local management.
+After=local-fs.target network.target
+Wants=jvlei-updater.service
 
 [Service]
 Type=simple

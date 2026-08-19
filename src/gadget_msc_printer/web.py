@@ -29,6 +29,11 @@ from .config import (
     validate_config,
 )
 from .cups_manager import CupsError, CupsManager
+from .driver_catalog import (
+    MAX_OFFLINE_PACK_BYTES,
+    DriverCatalogError,
+    DriverCatalogManager,
+)
 from .driver_manager import DriverError, DriverManager, MAX_DRIVER_BYTES
 from .maintenance import MaintenanceManager
 from .physical_print import PhysicalPrintWorker
@@ -60,6 +65,7 @@ class ConfigWebApp:
         cups: CupsManager | None = None,
         physical_printer: PhysicalPrintWorker | None = None,
         driver_manager: DriverManager | None = None,
+        driver_catalog: DriverCatalogManager | None = None,
         updater_client: UpdaterClient | None = None,
     ) -> None:
         self.config_path = Path(config_path)
@@ -71,6 +77,12 @@ class ConfigWebApp:
         self.wifi = wifi or WifiManager()
         self.driver_manager = driver_manager or DriverManager()
         self.cups = cups or CupsManager(custom_profile_provider=self.driver_manager.profiles)
+        model_provider = getattr(self.cups, "installed_models", None)
+        self.driver_catalog = driver_catalog or DriverCatalogManager(
+            model_provider=model_provider if callable(model_provider) else None
+        )
+        if hasattr(self.cups, "catalog_model_provider"):
+            self.cups.catalog_model_provider = self.driver_catalog.get_model
         self.updater = updater_client or UpdaterClient()
         self.physical_printer = physical_printer or PhysicalPrintWorker(
             config.physical_printer, config.pdf, self.cups
@@ -108,6 +120,14 @@ class ConfigWebApp:
                 web.post("/api/drivers/analyze", self.analyze_driver),
                 web.post("/api/drivers/install", self.install_driver),
                 web.post("/api/drivers/rollback", self.rollback_driver),
+                web.get("/api/driver-catalog", self.get_driver_catalog),
+                web.post("/api/driver-catalog/refresh", self.refresh_driver_catalog),
+                web.post("/api/driver-packages/plan", self.plan_driver_package),
+                web.post("/api/driver-packages/install", self.install_driver_package),
+                web.get(r"/api/driver-jobs/{job_id:[a-f0-9]{32}}", self.get_driver_job),
+                web.post("/api/driver-offline/analyze", self.analyze_offline_driver_pack),
+                web.post("/api/driver-offline/install", self.install_offline_driver_pack),
+                web.post("/api/driver-validation", self.validate_driver_model),
                 web.get("/api/msc/config", self.get_msc_config),
                 web.put("/api/msc/config", self.put_msc_config),
                 web.post("/api/msc/rebuild", self.rebuild_msc),
@@ -157,7 +177,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.5"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.6"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
@@ -501,7 +521,16 @@ class ConfigWebApp:
 
     async def get_physical_printer(self, request: web.Request) -> web.Response:
         config = load_config(self.config_path)
-        cups_status = await asyncio.to_thread(self.cups.status, config.physical_printer)
+        cups_status = await asyncio.to_thread(self.cups.status, config.physical_printer, False)
+        await self._attach_driver_recommendations(cups_status)
+        if config.physical_printer.driver_profile.startswith("catalog:"):
+            try:
+                cups_status["selected_catalog_model"] = await asyncio.to_thread(
+                    self.driver_catalog.get_model,
+                    config.physical_printer.driver_profile.split(":", 1)[1],
+                )
+            except DriverCatalogError:
+                cups_status["selected_catalog_model"] = None
         print_status = await asyncio.to_thread(self.physical_printer.status)
         return web.json_response(
             {
@@ -515,7 +544,17 @@ class ConfigWebApp:
     async def scan_physical_printers(self, request: web.Request) -> web.Response:
         config = load_config(self.config_path)
         status = await asyncio.to_thread(self.cups.status, config.physical_printer)
+        await self._attach_driver_recommendations(status)
         return web.json_response({"ok": True, "cups": status})
+
+    async def _attach_driver_recommendations(self, cups_status: dict[str, Any]) -> None:
+        devices = cups_status.get("devices")
+        if not isinstance(devices, list) or not devices:
+            return
+        recommendations = await asyncio.to_thread(self.driver_catalog.recommendations, devices)
+        for device in devices:
+            if isinstance(device, dict):
+                device["catalog_recommendations"] = recommendations.get(str(device.get("uri", "")), [])
 
     async def put_physical_printer(self, request: web.Request) -> web.Response:
         payload = await request.json()
@@ -548,7 +587,7 @@ class ConfigWebApp:
         self.config = config
         self.physical_printer.update_config(physical)
         self.physical_printer.wake()
-        status = await asyncio.to_thread(self.cups.status, physical)
+        status = await asyncio.to_thread(self.cups.status, physical, False)
         return web.json_response(
             {
                 "ok": True,
@@ -584,7 +623,7 @@ class ConfigWebApp:
             )
         except CupsError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        status = await asyncio.to_thread(self.cups.status, config.physical_printer)
+        status = await asyncio.to_thread(self.cups.status, config.physical_printer, False)
         return web.json_response({"ok": True, "cups": status})
 
     async def delete_physical_printer(self, request: web.Request) -> web.Response:
@@ -609,8 +648,125 @@ class ConfigWebApp:
                 "ok": True,
                 "drivers": await asyncio.to_thread(self.driver_manager.drivers),
                 "profiles": await asyncio.to_thread(self.driver_manager.profiles),
+                "catalog": await asyncio.to_thread(self.driver_catalog.summary),
+                "jobs": await asyncio.to_thread(self.driver_catalog.recent_jobs),
             }
         )
+
+    async def get_driver_catalog(self, request: web.Request) -> web.Response:
+        try:
+            result = await asyncio.to_thread(
+                self.driver_catalog.search,
+                request.query.get("query", ""),
+                request.query.get("vendor", ""),
+                request.query.get("status", ""),
+                int(request.query.get("page", "1")),
+                int(request.query.get("page_size", "30")),
+            )
+        except (DriverCatalogError, TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, **result})
+
+    async def refresh_driver_catalog(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            update_sources = payload.get("update_sources", False)
+            if not isinstance(update_sources, bool):
+                raise DriverCatalogError("update_sources必须是布尔值")
+            self.cups.invalidate_models_cache()
+            result = await asyncio.to_thread(self.driver_catalog.refresh, update_sources)
+        except (DriverCatalogError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "summary": result})
+
+    async def plan_driver_package(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            result = await asyncio.to_thread(
+                self.driver_catalog.plan, str(payload.get("model_id", "")).strip()
+            )
+        except (DriverCatalogError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "plan": result})
+
+    async def install_driver_package(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            result = await asyncio.to_thread(
+                self.driver_catalog.install_async,
+                str(payload.get("model_id", "")).strip(),
+            )
+        except (DriverCatalogError, OSError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "job": result})
+
+    async def get_driver_job(self, request: web.Request) -> web.Response:
+        try:
+            result = await asyncio.to_thread(
+                self.driver_catalog.job, request.match_info["job_id"]
+            )
+        except DriverCatalogError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=404)
+        return web.json_response({"ok": True, "job": result})
+
+    async def analyze_offline_driver_pack(self, request: web.Request) -> web.Response:
+        try:
+            reader = await request.multipart()
+            field = await reader.next()
+            if field is None or field.name != "driver_pack" or not field.filename:
+                raise DriverCatalogError("请选择.jvdrv离线驱动包")
+            self.driver_catalog.staging_dir.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".offline-driver-upload-", dir=str(self.driver_catalog.staging_dir)
+            )
+            temporary_path = Path(temporary_name)
+            total = 0
+            try:
+                with open(descriptor, "wb", closefd=True) as handle:
+                    while True:
+                        chunk = await field.read_chunk(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_OFFLINE_PACK_BYTES:
+                            raise DriverCatalogError("离线驱动包超过512 MB限制")
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                staged = await asyncio.to_thread(
+                    self.driver_catalog.stage_offline,
+                    str(field.filename),
+                    temporary_path,
+                )
+            finally:
+                temporary_path.unlink(missing_ok=True)
+        except (DriverCatalogError, OSError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "upload": staged})
+
+    async def install_offline_driver_pack(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            result = await asyncio.to_thread(
+                self.driver_catalog.install_offline,
+                str(payload.get("upload_id", "")).strip(),
+            )
+        except (DriverCatalogError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "offline_pack": result})
+
+    async def validate_driver_model(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            result = await asyncio.to_thread(
+                self.driver_catalog.validate,
+                str(payload.get("model_id", "")).strip(),
+                str(payload.get("result", "")).strip(),
+                str(payload.get("notes", "")).strip(),
+            )
+        except (DriverCatalogError, OSError, ValueError) as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "validation": result})
 
     async def analyze_driver(self, request: web.Request) -> web.Response:
         """Stage and inspect a local Linux printer driver without installing it."""

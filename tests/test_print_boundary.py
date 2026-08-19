@@ -110,6 +110,33 @@ class PrintBoundaryDetectorTests(unittest.TestCase):
         self.assertEqual(event.reason, "idle_timeout")
         self.assertEqual(event.protocol, "unknown")
 
+    def test_zjstream_pjl_job_uses_eoj_boundary(self) -> None:
+        detector = PrintBoundaryDetector()
+        stream = (
+            UEL
+            + b"@PJL JOB\r\n"
+            + b"JZJZbinary-page"
+            + UEL
+            + b"@PJL EOJ\r\n"
+            + UEL
+        )
+
+        events = detector.feed(stream, 1)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].protocol, "zjstream")
+        self.assertEqual(events[0].reason, "pjl_eoj")
+
+    def test_hp_acl_firmware_is_identified_for_idle_completion(self) -> None:
+        detector = PrintBoundaryDetector()
+        detector.feed(b"JZJZ\x00agiACLDownload\x00HP LaserJet 1020", 100)
+
+        event = detector.poll(200, 100)
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.protocol, "hp_acl_firmware")
+
 
 if __name__ == "__main__":
     unittest.main()

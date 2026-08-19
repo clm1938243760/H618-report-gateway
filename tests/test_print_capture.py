@@ -45,6 +45,16 @@ class BlockingConverter:
         return target
 
 
+class IgnoringConverter:
+    def ignore_reason(self, source: str | Path) -> str:
+        del source
+        return "HP ACL firmware/initialization stream"
+
+    def convert(self, source: str | Path, source_type: str) -> Path:
+        del source, source_type
+        raise AssertionError("ignored streams must not be converted")
+
+
 class PrintCaptureTests(unittest.TestCase):
     def test_waiting_warning_is_rate_limited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -180,6 +190,25 @@ class PrintCaptureTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual(metadata["completion_reason"], "device_disconnect")
+
+    def test_firmware_stream_is_marked_ignored_without_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "firmware.prn"
+            source.write_bytes(b"firmware")
+            capture = PrintCapture(
+                PrinterConfig(output_dir=directory, min_job_bytes=1),
+                converter=IgnoringConverter(),  # type: ignore[arg-type]
+            )
+            capture._write_metadata(source, {"conversion_status": "pending"})
+
+            capture._convert_job(source)
+
+            metadata = capture._read_metadata(source)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual(metadata["conversion_status"], "ignored")
+            self.assertIn("firmware", metadata["conversion_skip_reason"].lower())
 
     def test_capture_once_splits_back_to_back_jobs_from_one_usb_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

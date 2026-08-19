@@ -134,3 +134,4 @@ pdf:
     - gpcl6
     - pcl6
   ps2pdf: ps2pdf
+  zjsdecode: zjsdecode

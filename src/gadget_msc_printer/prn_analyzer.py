@@ -13,6 +13,8 @@ PROTOCOL_LABELS = {
     "postscript": "PostScript",
     "pclxl": "PCL XL",
     "pcl": "PCL",
+    "zjstream": "ZjStream",
+    "hp_acl_firmware": "HP ACL 固件/初始化流",
     "escpr": "Epson ESC/P-R",
     "ufr": "Canon UFR II",
     "capt": "Canon CAPT",
@@ -25,6 +27,8 @@ CONVERSION_DETAILS = {
     "postscript": ("Ghostscript", "可使用 Ghostscript 转换为 PDF"),
     "pclxl": ("GhostPCL", "可使用 GhostPCL 转换为 PDF"),
     "pcl": ("GhostPCL", "可使用 GhostPCL 转换为 PDF"),
+    "zjstream": ("zjsdecode", "解压 JBIG 页面后合成为 PDF"),
+    "hp_acl_firmware": ("忽略", "打印机固件或初始化数据，不属于报告页面"),
     "text": ("文本渲染", "可按文本内容生成 PDF"),
     "escpr": ("仅采集", "当前未配置 Epson ESC/P-R 转换器，请下载原始 PRN 分析"),
     "ufr": ("仅采集", "当前未配置 Canon UFR II 转换器，请下载原始 PRN 分析"),
@@ -54,6 +58,7 @@ CONVERSION_STATUS_LABELS = {
     "completed": "转换完成",
     "failed": "转换失败",
     "disabled": "转换未启用",
+    "ignored": "已忽略",
 }
 
 
@@ -73,7 +78,17 @@ def analyze_prn(path: str | Path) -> dict[str, Any]:
     confidence = "low"
     evidence = "未发现已支持协议的明确特征"
 
-    if data.startswith(b"%PDF-"):
+    if b"AGIACLDOWNLOAD" in upper:
+        protocol, confidence, evidence = (
+            "hp_acl_firmware",
+            "high",
+            "检测到 HP ACL 固件下载标记",
+        )
+    elif b"JZJZ" in data:
+        protocol, confidence, evidence = "zjstream", "high", "检测到 ZjStream JZJZ 魔数"
+    elif b"ENTER LANGUAGE=ACL" in upper:
+        protocol, confidence, evidence = "zjstream", "medium", "PJL 指定 ACL/ZjStream"
+    elif data.startswith(b"%PDF-"):
         protocol, confidence, evidence = "pdf", "high", "文件头为 %PDF-"
     elif data.startswith(b"%!") or b"%!PS-ADOBE" in upper:
         protocol, confidence, evidence = "postscript", "high", "检测到 PostScript 文件头"
@@ -148,6 +163,7 @@ def analyze_prn(path: str | Path) -> dict[str, Any]:
             conversion_status, conversion_status or "-"
         ),
         "conversion_error": str(capture.get("conversion_error", ""))[:1000],
+        "conversion_skip_reason": str(capture.get("conversion_skip_reason", ""))[:1000],
     }
 
 
@@ -199,6 +215,7 @@ def analyze_recent_prn(directory: str | Path, limit: int = 20) -> list[dict[str,
                     "conversion_status": "",
                     "conversion_status_label": "-",
                     "conversion_error": "",
+                    "conversion_skip_reason": "",
                 }
             )
     return results
