@@ -220,6 +220,10 @@ class PdfConfig:
     enabled: bool = True
     output_dir: str = "/var/lib/gadget-msc-printer/reports_pdf"
     ghostpcl: list[str] = field(default_factory=lambda: ["gpcl6", "pcl6"])
+    xps_converters: list[str] = field(default_factory=lambda: ["xpstopdf", "gxps"])
+    escp_converters: list[str] = field(default_factory=lambda: ["escapy"])
+    escp_pins: int = 24
+    escp2_profile: str = "auto"
     ps2pdf: str = "ps2pdf"
     zjsdecode: str = "zjsdecode"
 
@@ -385,6 +389,10 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("printer.idle_complete_seconds must be between 0.5 and 120")
     if not 1 <= config.printer.min_job_bytes <= 10 * 1024 * 1024:
         raise ValueError("printer.min_job_bytes must be between 1 and 10485760")
+    if config.pdf.escp_pins not in {9, 24, 48}:
+        raise ValueError("pdf.escp_pins must be 9, 24, or 48")
+    if config.pdf.escp2_profile not in {"auto", "generic", "xp410", "sr800"}:
+        raise ValueError("pdf.escp2_profile must be auto, generic, xp410, or sr800")
     if (
         not config.physical_printer.queue_name
         or len(config.physical_printer.queue_name) > 64

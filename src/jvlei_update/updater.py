@@ -178,6 +178,13 @@ class ApplicationInstaller:
         temporary.symlink_to(target, target_is_directory=True)
         os.replace(temporary, link)
 
+    @staticmethod
+    def _advance_version_identity(state: dict[str, Any]) -> None:
+        """Keep server IDs aligned when installation bypasses a company assignment."""
+
+        state["previous_version_id"] = state.get("current_version_id")
+        state["current_version_id"] = None
+
     def _prepare_python_runtime(self, release: Path) -> None:
         venv = release / ".venv"
         self._run(["python3", "-m", "venv", "--system-site-packages", str(venv)], timeout=180)
@@ -441,6 +448,7 @@ class ApplicationInstaller:
         if replaced_updater_release is not None:
             shutil.rmtree(replaced_updater_release, ignore_errors=True)
         state = self.state_store.read()
+        self._advance_version_identity(state)
         state.update(
             current_version=version,
             current_release=str(new_release),

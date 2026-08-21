@@ -133,5 +133,12 @@ pdf:
   ghostpcl:
     - gpcl6
     - pcl6
+  xps_converters:
+    - xpstopdf
+    - gxps
+  escp_converters:
+    - escapy
+  escp_pins: 24
+  escp2_profile: auto
   ps2pdf: ps2pdf
   zjsdecode: zjsdecode

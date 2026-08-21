@@ -11,7 +11,7 @@ usage() {
 Usage: sudo $0 --accept-agpl /path/to/ghostpdl-${VERSION}.tar.xz
        sudo $0 --accept-agpl /path/to/ghostpdl-${VERSION}-gitlab.tar.gz
 
-This helper builds and installs gpcl6 from a verified GhostPDL source archive.
+This helper builds and installs gpcl6 and gxps from a verified GhostPDL source archive.
 The --accept-agpl flag confirms that you reviewed and accept the GNU AGPL terms
 for this installation. Commercial/closed distribution may require an Artifex
 commercial license.
@@ -101,9 +101,12 @@ fi
   --disable-gtk \
   --without-x \
   --without-tesseract
-make -j"$JOBS" gpcl6
+make -j"$JOBS" gpcl6 gxps
 install -m 0755 bin/gpcl6 /usr/local/bin/gpcl6
+install -m 0755 bin/gxps /usr/local/bin/gxps
 
 /usr/local/bin/gpcl6 -h >/dev/null
+/usr/local/bin/gxps -h >/dev/null
 echo "Installed: /usr/local/bin/gpcl6"
+echo "Installed: /usr/local/bin/gxps"
 echo "Version source: GhostPDL $VERSION"

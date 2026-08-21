@@ -62,6 +62,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.physical_printer.driver_profile, "hp_laserjet_m401_pcl6")
         self.assertEqual(loaded.physical_printer.page_size, "A4")
         self.assertEqual(loaded.physical_printer.poll_interval_seconds, 0.5)
+        self.assertEqual(loaded.pdf.escp_converters, ["escapy"])
+        self.assertEqual(loaded.pdf.escp_pins, 24)
+        self.assertEqual(loaded.pdf.escp2_profile, "auto")
 
     def test_legacy_printer_identity_is_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -138,6 +141,18 @@ class ConfigTests(unittest.TestCase):
         config.printer.driver_profile = "universal"
         config.msc.protected_files = ["../outside.ini"]
         with self.assertRaisesRegex(ValueError, "relative paths"):
+            validate_config(config)
+
+    def test_invalid_escp_pin_count_is_rejected(self) -> None:
+        config = AppConfig()
+        config.pdf.escp_pins = 12
+        with self.assertRaisesRegex(ValueError, "escp_pins"):
+            validate_config(config)
+
+    def test_invalid_escp2_profile_is_rejected(self) -> None:
+        config = AppConfig()
+        config.pdf.escp2_profile = "../../custom.conf"
+        with self.assertRaisesRegex(ValueError, "escp2_profile"):
             validate_config(config)
 
     def test_invalid_hotspot_configuration_is_rejected(self) -> None:

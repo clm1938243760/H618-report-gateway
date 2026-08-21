@@ -11,7 +11,12 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from scripts.build_company_update_zip import PAYLOAD_PATHS, include_file, payload_files
+from scripts.build_company_update_zip import (
+    INTERNAL_TEST_ONLY_PATHS,
+    PAYLOAD_PATHS,
+    include_file,
+    payload_files,
+)
 from jvlei_update.company_package import verify_company_package
 from jvlei_update.package import PackageError, build_package, safe_extract_payload, verify_package
 
@@ -143,7 +148,36 @@ class CompanyUpdatePackageTests(unittest.TestCase):
         project_root = Path(__file__).resolve().parents[1]
         relative_files = {path.relative_to(project_root).as_posix() for path in payload_files(project_root)}
         self.assertIn("assets", PAYLOAD_PATHS)
+        self.assertIn("third_party", PAYLOAD_PATHS)
         self.assertIn("assets/driver-pack-public.pem", relative_files)
+        self.assertIn(
+            "third_party/foo2zjs-hbpl/bin/linux-arm64/hbpldecode", relative_files
+        )
+        self.assertIn(
+            "third_party/foo2zjs-ddst/bin/linux-arm64/ddstdecode", relative_files
+        )
+        self.assertIn(
+            "third_party/foo2zjs-opl/bin/linux-arm64/opldecode", relative_files
+        )
+        self.assertIn(
+            "third_party/foo2zjs-slx/bin/linux-arm64/slxdecode", relative_files
+        )
+        self.assertIn(
+            "third_party/brlaser-brdecode/bin/linux-arm64/brdecode", relative_files
+        )
+        self.assertIn("scripts/install_escapy.sh", relative_files)
+        self.assertIn("scripts/escapy_arm64_requirements.lock", relative_files)
+        escapy_wheels = [
+            name
+            for name in relative_files
+            if name.startswith("third_party/escapy-arm64-wheelhouse/")
+            and name.endswith(".whl")
+        ]
+        self.assertEqual(len(escapy_wheels), 8)
+        for path in INTERNAL_TEST_ONLY_PATHS:
+            with self.subTest(internal_test_only=str(path)):
+                self.assertNotIn(path.as_posix(), relative_files)
+                self.assertFalse(include_file(Path(path.as_posix())))
         self.assertTrue(include_file(Path("assets/driver-pack-public.pem")))
         self.assertFalse(include_file(Path("assets/driver-pack-private.pem")))
         self.assertFalse(include_file(Path("secrets/release.key")))

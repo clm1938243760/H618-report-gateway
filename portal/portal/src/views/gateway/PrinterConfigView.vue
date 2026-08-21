@@ -27,6 +27,18 @@
         <span>任务结束判定</span>
         <strong class="success-text">{{ form.boundary_detection?.enabled ? "智能协议优先" : "仅超时判断" }}</strong>
       </div>
+      <div class="summary-item">
+        <span>标准格式转换器</span>
+        <strong class="success-text">{{ readyStandardConverterCount }}/{{ form.standard_converters.length }} 可用</strong>
+      </div>
+      <div class="summary-item">
+        <span>离线私有解析器</span>
+        <strong class="success-text">{{ readyDecoderCount }}/{{ form.private_decoders.length }} 可用</strong>
+      </div>
+      <div class="summary-item">
+        <span>仅识别协议</span>
+        <strong>{{ form.identification_only_protocols.length }} 组</strong>
+      </div>
     </div>
 
     <el-form ref="formRef" :model="form" label-position="top">
@@ -51,14 +63,124 @@
           </el-form-item>
           <el-form-item label="未知/异常打印流兜底等待（秒）">
             <el-input-number v-model="form.idle_complete_seconds" :min="0.5" :max="120" :step="0.5" controls-position="right" />
-            <div class="field-help">PJL、PCL、PCL XL、PostScript和PDF优先按协议结束，不等待该时间。</div>
+            <div class="field-help">PJL、PCL、PCL XL、PostScript、PDF及已识别的私有打印流优先按协议结束，不等待该时间。</div>
           </el-form-item>
           <el-form-item label="最小任务大小（字节）">
             <el-input-number v-model="form.min_job_bytes" :min="1" :max="10485760" controls-position="right" />
           </el-form-item>
+          <el-form-item label="ESC/P 点阵针数">
+            <el-select v-model="form.escp_pins">
+              <el-option :value="9" label="9针" />
+              <el-option :value="24" label="24针" />
+              <el-option :value="48" label="48针" />
+            </el-select>
+            <div class="field-help">仅用于经典ESC/P点阵打印流，ESC/P2不使用此设置。</div>
+          </el-form-item>
+          <el-form-item label="ESC/P2 打印机Profile">
+            <el-select v-model="form.escp2_profile">
+              <el-option
+                v-for="item in form.escp2_profiles"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+            <div class="field-help">{{ selectedEscp2Profile?.detail || "不同喷墨机型的喷头偏移不同，必须按驱动型号选择。" }}</div>
+          </el-form-item>
         </div>
       </section>
     </el-form>
+
+    <section class="surface reports-table">
+      <div class="surface-heading">
+        <div>
+          <h2>标准页面语言转换器</h2>
+          <p class="section-note">HP-GL/2由GhostPCL处理；CUPS/PWG Raster和Apple URF使用CUPS过滤器；PCLm直接保留PDF。</p>
+        </div>
+      </div>
+      <el-table :data="form.standard_converters" stripe class="desktop-only">
+        <el-table-column prop="label" label="打印流协议" min-width="230" />
+        <el-table-column prop="decoder" label="离线转换器" min-width="170" />
+        <el-table-column label="状态" width="115">
+          <template #default="{ row }">
+            <el-tag :type="decoderStatusType(row.status)" effect="light">{{ decoderStatusName(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="detail" label="说明" min-width="300" />
+      </el-table>
+      <div class="mobile-only mobile-record-list compact-record-list">
+        <article v-for="row in form.standard_converters" :key="row.protocol" class="mobile-record">
+          <div class="mobile-record-heading">
+            <div><strong>{{ row.label }}</strong><span>{{ row.decoder }}</span></div>
+            <el-tag :type="decoderStatusType(row.status)" effect="light">{{ decoderStatusName(row.status) }}</el-tag>
+          </div>
+          <p class="section-note">{{ row.detail }}</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="surface reports-table">
+      <div class="surface-heading">
+        <div>
+          <h2>仅识别并保留PRN</h2>
+          <p class="section-note">以下私有协议只做保守识别，不生成可能错误的PDF；原始PRN始终保留并可下载分析。</p>
+        </div>
+      </div>
+      <el-table :data="form.identification_only_protocols" stripe max-height="390" class="desktop-only">
+        <el-table-column prop="id" label="编号" width="80" />
+        <el-table-column prop="protocols" label="打印流协议" min-width="190" />
+        <el-table-column prop="models" label="代表机型" min-width="260" show-overflow-tooltip />
+        <el-table-column prop="evidence" label="识别依据" min-width="260" show-overflow-tooltip />
+        <el-table-column label="状态" width="105">
+          <template #default="{ row }">
+            <el-tag :type="decoderStatusType(row.status)" effect="light">{{ decoderStatusName(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="behavior" label="处理方式" min-width="300" show-overflow-tooltip />
+      </el-table>
+      <div class="mobile-only mobile-record-list compact-record-list">
+        <article v-for="row in form.identification_only_protocols" :key="row.id" class="mobile-record">
+          <div class="mobile-record-heading">
+            <div><strong>{{ row.id }} · {{ row.protocols }}</strong><span>{{ row.models }}</span></div>
+            <el-tag type="warning" effect="light">仅识别</el-tag>
+          </div>
+          <dl class="mobile-record-meta">
+            <dt>识别依据</dt>
+            <dd>{{ row.evidence }}</dd>
+            <dt>处理方式</dt>
+            <dd>{{ row.behavior }}</dd>
+          </dl>
+        </article>
+      </div>
+    </section>
+
+    <section class="surface reports-table">
+      <div class="surface-heading">
+        <div>
+          <h2>离线私有协议转换器</h2>
+          <p class="section-note">解析器全部在板端运行；缺失或禁用时保留原始 PRN，不生成错误 PDF。</p>
+        </div>
+      </div>
+      <el-table :data="form.private_decoders" stripe max-height="310" class="desktop-only">
+        <el-table-column prop="label" label="打印流协议" min-width="210" />
+        <el-table-column prop="decoder" label="离线解析器" min-width="170" />
+        <el-table-column label="状态" width="115">
+          <template #default="{ row }">
+            <el-tag :type="decoderStatusType(row.status)" effect="light">{{ decoderStatusName(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="detail" label="说明" min-width="320" show-overflow-tooltip />
+      </el-table>
+      <div class="mobile-only mobile-record-list compact-record-list">
+        <article v-for="row in form.private_decoders" :key="row.protocol" class="mobile-record">
+          <div class="mobile-record-heading">
+            <div><strong>{{ row.label }}</strong><span>{{ row.decoder }}</span></div>
+            <el-tag :type="decoderStatusType(row.status)" effect="light">{{ decoderStatusName(row.status) }}</el-tag>
+          </div>
+          <p class="section-note">{{ row.detail }}</p>
+        </article>
+      </div>
+    </section>
 
     <section class="surface reports-table">
       <div class="surface-heading">
@@ -74,6 +196,9 @@
           <template #default="{ row }">{{ formatBytes(row.size) }}</template>
         </el-table-column>
         <el-table-column prop="protocol_label" label="识别协议" width="145" />
+        <el-table-column label="ESC/P2 Profile" width="175">
+          <template #default="{ row }">{{ escp2ProfileSummary(row) }}</template>
+        </el-table-column>
         <el-table-column label="结束依据" width="150">
           <template #default="{ row }">{{ row.completion_reason_label || "-" }}</template>
         </el-table-column>
@@ -120,6 +245,10 @@
           <dl class="mobile-record-meta">
             <dt>识别协议</dt>
             <dd>{{ row.protocol_label }}</dd>
+            <template v-if="row.protocol === 'escp2'">
+              <dt>ESC/P2 Profile</dt>
+              <dd>{{ escp2ProfileSummary(row) }}</dd>
+            </template>
             <dt>结束依据</dt>
             <dd>{{ row.completion_reason_label || "-" }}</dd>
             <dt>接收耗时</dt>
@@ -170,12 +299,22 @@
         <dd>{{ formatDateTime(selectedJob.pdf_ready_at) }}</dd>
         <dt v-if="selectedJob.conversion_error">转换错误</dt>
         <dd v-if="selectedJob.conversion_error" class="detail-block">{{ selectedJob.conversion_error }}</dd>
-        <dt v-if="selectedJob.conversion_skip_reason">忽略原因</dt>
+        <dt v-if="selectedJob.conversion_skip_reason">{{ selectedJob.conversion_status === "retained" ? "保留原因" : "忽略原因" }}</dt>
         <dd v-if="selectedJob.conversion_skip_reason" class="detail-block">{{ selectedJob.conversion_skip_reason }}</dd>
         <dt>PJL 声明语言</dt>
         <dd>{{ selectedJob.declared_language || "未声明" }}</dd>
         <dt>处理方式</dt>
         <dd>{{ selectedJob.converter }}：{{ selectedJob.conversion_detail }}</dd>
+        <dt v-if="selectedJob.protocol === 'escp2'">ESC/P2实际Profile</dt>
+        <dd v-if="selectedJob.protocol === 'escp2'">{{ escp2ProfileName(selectedJob.escp2_profile_used) || "-" }}</dd>
+        <dt v-if="selectedJob.protocol === 'escp2'">ESC/P2自动建议</dt>
+        <dd v-if="selectedJob.protocol === 'escp2'">{{ escp2ProfileName(selectedJob.escp2_profile_hint) || "未匹配" }}</dd>
+        <dt v-if="selectedJob.protocol === 'escp2'">建议依据</dt>
+        <dd v-if="selectedJob.protocol === 'escp2'">{{ selectedJob.escp2_profile_evidence || "-" }}</dd>
+        <dt v-if="selectedJob.raster_dpi_x && selectedJob.raster_dpi_y">栅格分辨率</dt>
+        <dd v-if="selectedJob.raster_dpi_x && selectedJob.raster_dpi_y">
+          {{ selectedJob.raster_dpi_x }} × {{ selectedJob.raster_dpi_y }} dpi
+        </dd>
         <dt>判断依据</dt>
         <dd>{{ selectedJob.evidence }}</dd>
         <dt>SHA-256</dt>
@@ -221,15 +360,24 @@ const form = reactive({
   usb_serial: "K2B-H618-PRINTER-001",
   idle_complete_seconds: 20,
   min_job_bytes: 128,
+  escp_pins: 24,
+  escp2_profile: "auto",
+  escp2_profiles: [],
   boundary_detection: {
     enabled: true,
     mode: "protocol_first",
     supported_protocols: [],
     ambiguous_marker_grace_ms: 200
   },
+  standard_converters: [],
+  private_decoders: [],
+  identification_only_protocols: [],
   active: false
 });
 const selectedProfile = computed(() => form.driver_profiles.find((item) => item.value === form.driver_profile));
+const selectedEscp2Profile = computed(() => form.escp2_profiles.find((item) => item.value === form.escp2_profile));
+const readyStandardConverterCount = computed(() => form.standard_converters.filter((item) => item.status === "ready").length);
+const readyDecoderCount = computed(() => form.private_decoders.filter((item) => item.status === "ready").length);
 const textRules = (message) => [{ required: true, message, trigger: "blur" }];
 
 async function loadConfig() {
@@ -285,7 +433,9 @@ async function saveConfig() {
       usb_product: form.usb_product,
       usb_serial: form.usb_serial,
       idle_complete_seconds: form.idle_complete_seconds,
-      min_job_bytes: form.min_job_bytes
+      min_job_bytes: form.min_job_bytes,
+      escp_pins: form.escp_pins,
+      escp2_profile: form.escp2_profile
     });
     ElMessage.success(data.applied ? "打印配置已保存并应用" : "打印配置已保存");
     await loadAll();
@@ -311,6 +461,23 @@ function downloadPrn(row) {
   link.remove();
 }
 
+function escp2ProfileName(value) {
+  if (!value) return "";
+  return form.escp2_profiles.find((item) => item.value === value)?.label || value;
+}
+
+function escp2ProfileSummary(row) {
+  if (row?.protocol !== "escp2") return "-";
+  const used = escp2ProfileName(row.escp2_profile_used);
+  const hint = escp2ProfileName(row.escp2_profile_hint);
+  if (used && hint && row.escp2_profile_used !== row.escp2_profile_hint) {
+    return `实际 ${used} / 建议 ${hint}`;
+  }
+  if (used) return `实际 ${used}`;
+  if (hint) return `建议 ${hint}`;
+  return "未匹配";
+}
+
 function confidenceType(value) {
   return value === "high" ? "success" : value === "medium" ? "warning" : "info";
 }
@@ -320,7 +487,15 @@ function confidenceName(value) {
 }
 
 function conversionType(value) {
-  return value === "completed" ? "success" : value === "failed" ? "danger" : value === "running" ? "warning" : "info";
+  return value === "completed" ? "success" : value === "failed" ? "danger" : ["running", "retained"].includes(value) ? "warning" : "info";
+}
+
+function decoderStatusType(value) {
+  return value === "ready" ? "success" : ["disabled", "recognized"].includes(value) ? "warning" : "danger";
+}
+
+function decoderStatusName(value) {
+  return value === "ready" ? "可用" : value === "recognized" ? "仅识别" : value === "disabled" ? "已禁用" : "缺失";
 }
 
 function formatDuration(value) {
@@ -348,3 +523,20 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", refreshVisibleAnalysis);
 });
 </script>
+
+<style scoped>
+.surface-heading > div {
+  min-width: 0;
+}
+
+.surface-heading .section-note {
+  display: block;
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+.compact-record-list .mobile-record > .section-note {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+</style>

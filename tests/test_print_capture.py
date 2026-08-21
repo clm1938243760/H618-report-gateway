@@ -55,6 +55,50 @@ class IgnoringConverter:
         raise AssertionError("ignored streams must not be converted")
 
 
+class FailingConverter:
+    last_error = "qpdldecode failed with exit code 2: invalid page record"
+
+    def ignore_reason(self, source: str | Path) -> str:
+        del source
+        return ""
+
+    def convert(self, source: str | Path, source_type: str) -> None:
+        del source, source_type
+        return None
+
+
+class RetainingConverter:
+    last_error = "Canon UFR II is identification-only; the original PRN has been retained"
+    last_outcome = "retained"
+
+    def ignore_reason(self, source: str | Path) -> str:
+        del source
+        return ""
+
+    def convert(self, source: str | Path, source_type: str) -> None:
+        del source, source_type
+        return None
+
+
+class ProfileConverter:
+    last_error = ""
+    last_outcome = "completed"
+    last_escp2_profile = "sr800"
+
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = output_dir
+
+    def ignore_reason(self, source: str | Path) -> str:
+        del source
+        return ""
+
+    def convert(self, source: str | Path, source_type: str) -> Path:
+        del source, source_type
+        target = self.output_dir / "profile.pdf"
+        target.write_bytes(b"%PDF-1.7\n%%EOF\n")
+        return target
+
+
 class PrintCaptureTests(unittest.TestCase):
     def test_waiting_warning_is_rate_limited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -209,6 +253,64 @@ class PrintCaptureTests(unittest.TestCase):
             assert metadata is not None
             self.assertEqual(metadata["conversion_status"], "ignored")
             self.assertIn("firmware", metadata["conversion_skip_reason"].lower())
+
+    def test_converter_detail_is_saved_when_private_decode_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "private.prn"
+            source.write_bytes(b"private")
+            capture = PrintCapture(
+                PrinterConfig(output_dir=directory, min_job_bytes=1),
+                converter=FailingConverter(),  # type: ignore[arg-type]
+            )
+            capture._write_metadata(source, {"conversion_status": "pending"})
+
+            capture._convert_job(source)
+
+            metadata = capture._read_metadata(source)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual(metadata["conversion_status"], "failed")
+            self.assertIn("invalid page record", metadata["conversion_error"])
+
+    def test_identification_only_stream_is_marked_retained_not_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "ufr.prn"
+            source.write_bytes(b"@PJL ENTER LANGUAGE=UFRII\r\nprivate")
+            capture = PrintCapture(
+                PrinterConfig(output_dir=directory, min_job_bytes=1),
+                converter=RetainingConverter(),  # type: ignore[arg-type]
+            )
+            capture._write_metadata(source, {"conversion_status": "pending"})
+
+            capture._convert_job(source)
+
+            metadata = capture._read_metadata(source)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual(metadata["conversion_status"], "retained")
+            self.assertEqual(metadata["conversion_error"], "")
+            self.assertIn("identification-only", metadata["conversion_skip_reason"])
+
+    def test_used_escp2_profile_is_saved_in_capture_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "escp2.prn"
+            source.write_bytes(b"ESC/P2")
+            capture = PrintCapture(
+                PrinterConfig(output_dir=directory, min_job_bytes=1),
+                converter=ProfileConverter(root),  # type: ignore[arg-type]
+            )
+            capture._write_metadata(source, {"conversion_status": "pending"})
+
+            capture._convert_job(source)
+
+            metadata = capture._read_metadata(source)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual(metadata["conversion_status"], "completed")
+            self.assertEqual(metadata["escp2_profile_used"], "sr800")
 
     def test_capture_once_splits_back_to_back_jobs_from_one_usb_read(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -577,3 +577,17 @@ class ApplicationInstallerTests(unittest.TestCase):
         self.assertFalse(self.application.is_symlink())
         self.assertEqual((self.application / "VERSION").read_text(encoding="ascii").strip(), "0.20.0")
         self.assertFalse((self.root / "releases" / "0.21.0").exists())
+
+
+class ApplicationInstallerStateTests(unittest.TestCase):
+    def test_direct_install_clears_stale_server_version_id(self) -> None:
+        state = {
+            "current_version": "0.22.5",
+            "current_version_id": 2088091501755707393,
+            "previous_version_id": 2087475023754899457,
+        }
+
+        ApplicationInstaller._advance_version_identity(state)
+
+        self.assertIsNone(state["current_version_id"])
+        self.assertEqual(state["previous_version_id"], 2088091501755707393)

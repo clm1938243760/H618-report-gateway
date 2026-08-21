@@ -767,6 +767,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
                 "usb_serial": "K2B-TEST-001",
                 "idle_complete_seconds": 5,
                 "min_job_bytes": 64,
+                "escp_pins": 9,
+                "escp2_profile": "xp410",
             },
         )
         payload = await response.json()
@@ -779,6 +781,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.printer.usb_manufacturer, "JVLEI")
         self.assertIn("MFG:JVLEI", saved.printer.usb_pnp_string)
         self.assertIn("CMD:PJL,PCL,PCLXL,RAW", saved.printer.usb_pnp_string)
+        self.assertEqual(saved.pdf.escp_pins, 9)
+        self.assertEqual(saved.pdf.escp2_profile, "xp410")
 
         response = await self.client.get("/api/printer/config", headers=headers)
         public_config = await response.json()
@@ -786,6 +790,87 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(public_config["boundary_detection"]["enabled"])
         self.assertEqual(public_config["boundary_detection"]["mode"], "protocol_first")
         self.assertIn("PCL", public_config["boundary_detection"]["supported_protocols"])
+        self.assertIn("HP-GL/2", public_config["boundary_detection"]["supported_protocols"])
+        self.assertIn("ESC/P-R", public_config["boundary_detection"]["supported_protocols"])
+        self.assertEqual(public_config["escp_pins"], 9)
+        self.assertEqual(public_config["escp2_profile"], "xp410")
+        self.assertEqual(
+            {item["value"] for item in public_config["escp2_profiles"]},
+            {"auto", "generic", "xp410", "sr800"},
+        )
+        auto_profile = next(
+            item
+            for item in public_config["escp2_profiles"]
+            if item["value"] == "auto"
+        )
+        self.assertIn("严格自动匹配", auto_profile["label"])
+        self.assertIn("未匹配时保留PRN", auto_profile["detail"])
+        xp410 = next(
+            item
+            for item in public_config["escp2_profiles"]
+            if item["value"] == "xp410"
+        )
+        self.assertIn("c8x/c82", xp410["label"])
+        for model in ("XP-440", "L120", "L310", "ET-2750"):
+            self.assertIn(model, xp410["detail"])
+        sr800 = next(
+            item
+            for item in public_config["escp2_profiles"]
+            if item["value"] == "sr800"
+        )
+        self.assertIn("R800 Gutenprint编码链验证", sr800["detail"])
+        standard = {item["protocol"]: item for item in public_config["standard_converters"]}
+        self.assertEqual(
+            set(standard),
+            {
+                "postscript",
+                "pcl",
+                "xps",
+                "pwg_raster",
+                "cups_raster",
+                "escp",
+                "escpr",
+                "image",
+                "pclm",
+                "apple_urf",
+            },
+        )
+        self.assertEqual(standard["xps"]["decoder"], "xpstopdf")
+        self.assertEqual(standard["escp"]["decoder"], "escapy")
+        self.assertEqual(standard["escpr"]["decoder"], "内置受限解码器")
+        self.assertIn("COLOR、MONO和多页", standard["escpr"]["detail"])
+        self.assertIn("EndJob到达后立即封包", standard["escpr"]["detail"])
+        self.assertEqual(standard["image"]["status"], "ready")
+        self.assertEqual(standard["pclm"]["status"], "ready")
+        self.assertIn(standard["apple_urf"]["status"], {"ready", "missing"})
+        decoders = {item["protocol"]: item for item in public_config["private_decoders"]}
+        self.assertIn("spl", decoders)
+        self.assertEqual(decoders["spl"]["decoder"], "qpdldecode")
+        self.assertIn(decoders["hbpl"]["status"], {"ready", "missing"})
+        self.assertEqual(decoders["hbpl"]["decoder"], "hbpldecode（审核版）")
+        self.assertEqual(decoders["ddst"]["decoder"], "ddstdecode（审核版）")
+        self.assertEqual(decoders["opl"]["decoder"], "opldecode（审核版）")
+        self.assertEqual(decoders["slx"]["decoder"], "slxdecode（审核版）")
+        self.assertIn("oakt", decoders)
+        self.assertIn("gipd", decoders)
+        self.assertEqual(decoders["gipd"]["status"], "recognized")
+        identification_only = public_config["identification_only_protocols"]
+        self.assertEqual(
+            [item["id"] for item in identification_only],
+            [f"C{number:02d}" for number in range(1, 12)],
+        )
+        self.assertTrue(
+            all(item["status"] == "recognized" for item in identification_only)
+        )
+        self.assertTrue(
+            all("保留原始PRN" in item["behavior"] for item in identification_only)
+        )
+        self.assertIn("PCL3", identification_only[0]["protocols"])
+        self.assertIn("Printrex", identification_only[-1]["protocols"])
+        self.assertIn("不能导出页面", decoders["gipd"]["detail"])
+        self.assertIn("brother_hbp", decoders)
+        self.assertEqual(decoders["brother_hbp"]["decoder"], "brdecode（审核版）")
+        self.assertNotIn("/usr/", decoders["spl"]["decoder"])
         for hidden in ("usb_vendor_id", "usb_product_id", "usb_manufacturer", "usb_pnp_string"):
             self.assertNotIn(hidden, public_config)
 

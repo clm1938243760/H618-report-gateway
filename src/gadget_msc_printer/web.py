@@ -36,8 +36,10 @@ from .driver_catalog import (
 )
 from .driver_manager import DriverError, DriverManager, MAX_DRIVER_BYTES
 from .maintenance import MaintenanceManager
+from .pdf_converter import PWG_TO_PDF
 from .physical_print import PhysicalPrintWorker
-from .prn_analyzer import analyze_recent_prn
+from .private_raster import PRIVATE_RASTER_SPECS
+from .prn_analyzer import C_GROUP_CAPABILITIES, analyze_recent_prn
 from .print_boundary import BOUNDARY_GRACE_NS, SUPPORTED_BOUNDARY_PROTOCOLS
 from .report_info import ReportInfoManager
 from .report_upload import ReportUploadWorker
@@ -177,7 +179,7 @@ class ConfigWebApp:
         return await handler(request)
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.22.6"})
+        return web.json_response({"ok": True, "service": "gadget-web", "version": "0.81.0"})
 
     async def login_page(self, request: web.Request) -> web.Response:
         return self._frontend_index()
@@ -415,6 +417,129 @@ class ConfigWebApp:
             "postscript": "PostScript",
             "raw": "原始数据采集",
         }
+        private_decoders = []
+        for spec in PRIVATE_RASTER_SPECS:
+            command = config.pdf.zjsdecode if spec.protocol == "zjstream" else spec.decoder
+            decoder_label = Path(command).name
+            if spec.protocol in {"hbpl", "ddst", "opl", "slx", "brother_hbp"}:
+                decoder_label += "（审核版）"
+            installed = shutil.which(command) is not None
+            status = "ready" if spec.enabled and installed else "recognized" if not spec.enabled else "missing"
+            detail = (
+                "可离线转换"
+                if status == "ready"
+                else spec.disabled_reason
+                if status == "recognized"
+                else f"缺少 {decoder_label}"
+            )
+            private_decoders.append(
+                {
+                    "protocol": spec.protocol,
+                    "label": spec.label,
+                    "decoder": decoder_label,
+                    "status": status,
+                    "detail": detail,
+                }
+            )
+        standard_converters = []
+        converter_specs = (
+            (
+                "postscript",
+                "PostScript / EPS",
+                (config.pdf.ps2pdf,),
+                "Ghostscript",
+            ),
+            (
+                "pcl",
+                "PCL / PCL XL / HP-GL/2",
+                tuple(config.pdf.ghostpcl),
+                "GhostPCL",
+            ),
+            (
+                "xps",
+                "XPS / OpenXPS",
+                tuple(config.pdf.xps_converters),
+                "XPS转换器",
+            ),
+            (
+                "pwg_raster",
+                "PWG Raster",
+                (PWG_TO_PDF,),
+                "CUPS pwgtopdf",
+            ),
+            (
+                "cups_raster",
+                "CUPS Raster",
+                (PWG_TO_PDF,),
+                "CUPS pwgtopdf",
+            ),
+            (
+                "apple_urf",
+                "Apple URF",
+                (PWG_TO_PDF,),
+                "CUPS pwgtopdf",
+            ),
+            (
+                "escp",
+                "Epson ESC/P / ESC/P2",
+                tuple(config.pdf.escp_converters),
+                "EscaPy",
+            ),
+        )
+        for protocol, label, commands, engine in converter_specs:
+            installed_command = next(
+                (command for command in commands if shutil.which(command)), ""
+            )
+            configured_command = commands[0] if commands else ""
+            standard_converters.append(
+                {
+                    "protocol": protocol,
+                    "label": label,
+                    "decoder": Path(installed_command or configured_command).name or engine,
+                    "status": "ready" if installed_command else "missing",
+                    "detail": (
+                        f"{Path(installed_command).name} 可离线转换；授权由安装方负责"
+                        if installed_command and protocol == "escp"
+                        else f"{Path(installed_command).name} 可离线转换"
+                        if installed_command
+                        else "未安装EscaPy；请重新执行v0.81研发包离线安装"
+                        if protocol == "escp"
+                        else f"缺少 {engine} 可执行程序"
+                    ),
+                }
+            )
+        standard_converters.append(
+            {
+                "protocol": "image",
+                "label": "JPEG / PNG / BMP / TIFF / PCX / DCX",
+                "decoder": "Pillow",
+                "status": "ready",
+                "detail": "支持图像型PRN；TIFF和DCX可保留多页",
+            }
+        )
+        standard_converters.append(
+            {
+                "protocol": "escpr",
+                "label": "Epson ESC/P-R",
+                "decoder": "内置受限解码器",
+                "status": "ready",
+                "detail": (
+                    "已验证printer-driver-escpr 1.7.17的COLOR、MONO和多页RGB光栅；"
+                    "EndJob到达后立即封包，未知变体保留原始PRN"
+                ),
+            }
+        )
+        standard_converters.extend(
+            (
+                {
+                    "protocol": "pclm",
+                    "label": "PCLm",
+                    "decoder": "直接保留PDF",
+                    "status": "ready",
+                    "detail": "PCLm是PDF-based打印流，无需重新渲染",
+                },
+            )
+        )
         return web.json_response(
             {
                 "driver_profile": config.printer.driver_profile,
@@ -430,12 +555,46 @@ class ConfigWebApp:
                 "usb_serial": config.printer.usb_serial,
                 "idle_complete_seconds": config.printer.idle_complete_seconds,
                 "min_job_bytes": config.printer.min_job_bytes,
+                "escp_pins": config.pdf.escp_pins,
+                "escp2_profile": config.pdf.escp2_profile,
+                "escp2_profiles": [
+                    {
+                        "value": "auto",
+                        "label": "严格自动匹配（推荐）",
+                        "detail": "仅自动选择已验证的c8x/c82或R800指纹；未匹配时保留PRN",
+                    },
+                    {
+                        "value": "generic",
+                        "label": "通用（喷头通道无偏移）",
+                        "detail": "适用于颜色喷头在同一基线的ESC/P2流",
+                    },
+                    {
+                        "value": "xp410",
+                        "label": "Epson c8x/c82系列",
+                        "detail": "EscaPy内置xp410 Profile；已用XP-440、L120、L310和ET-2750 Gutenprint编码链验证页面",
+                    },
+                    {
+                        "value": "sr800",
+                        "label": "Epson Stylus Photo R800系列",
+                        "detail": "EscaPy内置Profile；已用R800 Gutenprint编码链验证页面",
+                    },
+                ],
                 "boundary_detection": {
                     "enabled": True,
                     "mode": "protocol_first",
                     "supported_protocols": list(SUPPORTED_BOUNDARY_PROTOCOLS),
                     "ambiguous_marker_grace_ms": BOUNDARY_GRACE_NS // 1_000_000,
                 },
+                "standard_converters": standard_converters,
+                "private_decoders": private_decoders,
+                "identification_only_protocols": [
+                    {
+                        **item,
+                        "status": "recognized",
+                        "behavior": "高置信识别并保留原始PRN，不生成PDF，可在分析列表下载",
+                    }
+                    for item in C_GROUP_CAPABILITIES
+                ],
                 "active": config.gadget.mode in {"printer", "printer_hid"},
             }
         )
@@ -460,6 +619,12 @@ class ConfigWebApp:
             config.printer.min_job_bytes = int(
                 payload.get("min_job_bytes", config.printer.min_job_bytes)
             )
+            config.pdf.escp_pins = int(
+                payload.get("escp_pins", config.pdf.escp_pins)
+            )
+            config.pdf.escp2_profile = str(
+                payload.get("escp2_profile", config.pdf.escp2_profile)
+            ).strip()
             config.printer.usb_pnp_string = build_printer_pnp_string(config.printer)
             validate_config(config)
             await asyncio.to_thread(save_config, self.config_path, config)

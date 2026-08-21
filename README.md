@@ -1,7 +1,10 @@
 # KICKPI K2B MSC / Printer 报告网关
 
-当前开发版本：`v0.22.6`。完整变更和部署注意事项见
-[v0.22.6 版本说明](docs/RELEASE_NOTES_v0.22.6.md)。
+当前研发版本：`v0.81`（应用版本`0.81.0`）。完整变更和部署注意事项见
+[v0.81 版本说明](docs/RELEASE_NOTES_v0.81.md)。
+详细协议、验证等级和代表型号见[PRN兼容矩阵](docs/PRN_COMPATIBILITY_MATRIX.md)。
+可筛选的型号、驱动、验证证据和依赖对应见
+[完整适配对应表](docs/H618_PRN完整适配对应表_v0.81.xlsx)。
 
 本项目是 RK3566 报告网关的独立迁移版本，目标硬件为 KICKPI K2B（Allwinner
 H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发和部署改动。
@@ -31,7 +34,10 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 - HID 复合模式同时提供标准键盘和相对鼠标 Function。
 - MSC 模式通过 FAT32 镜像接收报告。
 - Printer 模式从 `/dev/g_printer0` 接收打印流。
-- 处理 PDF、PostScript、PCL/PCL XL、JPEG、PNG、BMP 和文本。
+- 处理 PDF、PCLm、CUPS/PWG Raster、Apple URF、PostScript、PCL/PCL XL、HP-GL/2、
+  XPS/OpenXPS、JPEG、PNG、BMP、单页/多页TIFF、PCX、DCX和文本；
+  v0.81研发包按已确认的AGPL测试授权离线安装EscaPy后可处理ESC/P和ESC/P2，内置解码器可处理官方
+  `printer-driver-escpr`生成的COLOR、MONO和多页RGB ESC/P-R。
 - SQLite 上传队列、失败重试、日志查询和定期清理。
 - 生成最小 `ReportInfo.xml`。
 - 正式上传携带 `MacCode`、`MsgId`、`hospitalCode` Header。
@@ -48,6 +54,32 @@ H618，2GB LPDDR4，16GB eMMC）。原 RK3566 项目不会被本目录的开发�
 - 实体打印机支持 Noble ARM64 型号目录搜索、受控 APT 按需安装、人工实机验证，
   以及签名 `.jvdrv` 完整离线驱动库导入能力。构建和使用说明见
   [实体打印驱动目录](docs/PHYSICAL_PRINTER_DRIVERS.md)。
+- 模拟打印流除 PCL、PCL XL、PostScript 和 ZjStream 外，还可在板端离线转换
+  QPDL/SPL-C、XQX、HIPERC、DDST、LAVAFLOW、Raster Object/OPL、SLX、OAKT
+  和 Brother HBP。HBPL、DDST、OPL和SLX使用随源码保留的审核版GPL解码器，不调用
+  系统中已知会崩溃或漏彩色平面的版本；完整PPD编码链验证范围见兼容矩阵。
+- Granite GIPD可高置信识别并保留原始PRN，但Noble自带`gipddecode`只分析记录结构，
+  不导出页面，因此当前不宣称可转换PDF。
+- C组私有流支持只读识别和原始PRN下载：Canon UFR/CAPT、Pantum GDI、Sharp SPLC、
+  Ricoh RPCS、IBM AFP、Zebra ZPL/EPL/CPCL和Printrex；没有可靠反向解码器时不会生成
+  猜测性PDF，Sharp的SPLC必须带厂商上下文才会与Samsung SPL区分。
+- Brother HBP/XL2HB 使用 `brlaser` 上游自带的审核版 `brdecode` 离线还原，覆盖
+  HL-1110/1200（含HL-1218W）及DCP-1510等同类主机型黑白激光打印流。
+- PCL3/PCL3GUI、ESC/P、ESC/P2、ESC/P-R、ESC/Page现在分别识别，不再把PCL3GUI
+  误报为普通PCL，也不再把任意EJL流误报为ESC/P-R。PCL3/PCL3GUI按C组处理：只
+  识别、分析和保留原始PRN，不调用会生成破损页面的GhostPCL路径。
+- ESC/P和ESC/P2调用研发包离线安装的EscaPy 1.1.0；经典ESC/P支持选择9/24/48针。
+  ESC/P2默认使用严格自动匹配，仅对已验证的Gutenprint c8x/c82和R800初始化指纹自动
+  选择`xp410`或`sr800`；未匹配的流保留PRN，也可在网页手动选择`generic`、`xp410`或
+  `sr800`。`xp410`已用XP-440、L120、L310和ET-2750编码链验证，其中L120、L310
+  覆盖360/720 dpi；`sr800`已用Stylus Photo R800编码链验证。
+  当前AGPL授权范围仅限指定K2B
+  测试板内部研发测试；`v0.81`研发包包含适配代码、锁定依赖和安装脚本。
+- ESC/P-R使用项目内置的受限解码器，不依赖EscaPy。Ubuntu Noble
+  `printer-driver-escpr 1.7.17`的L3250、Artisan 630、Stylus Photo R260、ET-2750、
+  WF-6590和XP-4100 PPD已完成完整CUPS编码链验证；COLOR、MONO和双页PDF逐页检查
+  通过。采集器按结构化`endj`和REMOTE1收尾立即封包，不再固定等待空闲超时；调色板、
+  JPEG型ESC/P-R及未知扩展仍保留原始PRN，不生成猜测性PDF。
 
 所有模式共用一个 USB Device Controller，同一时刻只绑定一个 Gadget。
 
@@ -109,6 +141,13 @@ py -3.14 -m unittest discover -s tests -v
 py -3.14 -m compileall -q src scripts tests
 ```
 
+可在板端只读回放最近的PRN，核对协议、边界偏移和结束依据，不修改原文件：
+
+```bash
+PYTHONPATH=src python3 scripts/replay_print_boundaries.py \
+  /var/lib/gadget-msc-printer/print_jobs --limit 20 --chunk-size 16384
+```
+
 Vue 生产构建必须位于：
 
 ```text
@@ -127,7 +166,11 @@ H618 芯片具有 USB OTG 不等于当前 Armbian 内核已经启用 USB Printer
 configfs function。Printer 能否创建 `/dev/g_printer0` 是本次迁移的首要门槛，
 必须实板验证，不能只依据芯片或开发板规格判断。
 
-PCL/PCL XL 转 PDF 依赖 GhostPDL `gpcl6`。当前安装仅获准用于该 K2B 测试板的
+PCL/PCL XL/HP-GL/2 转 PDF 依赖 GhostPDL `gpcl6`；XPS/OpenXPS优先使用Ubuntu
+`libgxps-utils`的`xpstopdf`，也可使用`gxps`备用；PWG Raster使用`cups-filters`
+提供的固定`/usr/lib/cups/filter/pwgtopdf`处理CUPS/PWG Raster和Apple URF，PCLm直接
+保留其PDF内容。
+当前安装仅获准用于该 K2B 测试板的
 内部测试；商业发布前必须重新完成 AGPL、PCL/XL 字体 AFPL 或 Artifex 商业许可
 评审。安装和实测记录见
 [docs/GHOSTPDL_INTERNAL_TEST_20260803.md](docs/GHOSTPDL_INTERNAL_TEST_20260803.md)。

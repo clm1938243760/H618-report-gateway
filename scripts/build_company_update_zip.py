@@ -31,11 +31,15 @@ PAYLOAD_PATHS = (
     "overlays",
     "templates",
     "assets",
+    "third_party",
     "portal/portal/dist",
 )
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", "node_modules", ".playwright-cli"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".pem", ".key", ".crt", ".token", ".jvpkg", ".zip"}
 ALLOWED_SENSITIVE_ASSETS = {PurePosixPath("assets/driver-pack-public.pem")}
+INTERNAL_TEST_ONLY_PATHS = {
+    PurePosixPath("scripts/build_ghostpcl.sh"),
+}
 
 
 def git_value(source: Path, *args: str) -> str:
@@ -49,7 +53,11 @@ def include_file(path: Path) -> bool:
     portable = PurePosixPath(path.as_posix())
     if portable in ALLOWED_SENSITIVE_ASSETS:
         return True
-    return not any(part in EXCLUDED_PARTS for part in path.parts) and path.suffix.lower() not in EXCLUDED_SUFFIXES
+    return (
+        portable not in INTERNAL_TEST_ONLY_PATHS
+        and not any(part in EXCLUDED_PARTS for part in path.parts)
+        and path.suffix.lower() not in EXCLUDED_SUFFIXES
+    )
 
 
 def payload_files(source: Path) -> list[Path]:

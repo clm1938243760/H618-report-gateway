@@ -19,7 +19,7 @@ from .pdf_converter import PdfConverter
 from .print_boundary import BoundaryEvent, PrintBoundaryDetector
 
 LOGGER = logging.getLogger(__name__)
-METADATA_SCHEMA_VERSION = 1
+METADATA_SCHEMA_VERSION = 2
 
 
 def _utc_now() -> datetime:
@@ -219,6 +219,7 @@ class PrintCapture:
             "pdf_path": "",
             "conversion_error": "",
             "conversion_skip_reason": "",
+            "escp2_profile_used": "",
         }
         self._write_metadata(active.final_path, metadata)
         LOGGER.info(
@@ -287,13 +288,25 @@ class PrintCapture:
         self._write_metadata(source, metadata)
         try:
             target = self.converter.convert(source, "print")
+            metadata["escp2_profile_used"] = str(
+                getattr(self.converter, "last_escp2_profile", "")
+            )
             metadata["conversion_duration_ms"] = round(
                 max(0, time.monotonic_ns() - started_ns) / 1_000_000,
                 3,
             )
             if target is None:
-                metadata["conversion_status"] = "failed"
-                metadata["conversion_error"] = "converter returned no PDF"
+                outcome = str(getattr(self.converter, "last_outcome", ""))
+                detail = str(
+                    getattr(self.converter, "last_error", "") or "converter returned no PDF"
+                )[:1000]
+                if outcome in {"disabled", "ignored", "retained"}:
+                    metadata["conversion_status"] = outcome
+                    metadata["conversion_error"] = ""
+                    metadata["conversion_skip_reason"] = detail
+                else:
+                    metadata["conversion_status"] = "failed"
+                    metadata["conversion_error"] = detail
             else:
                 metadata["conversion_status"] = "completed"
                 metadata["pdf_ready_at"] = _iso_utc(_utc_now())
@@ -344,6 +357,7 @@ class PrintCapture:
                     "pdf_path": "",
                     "conversion_error": "",
                     "conversion_skip_reason": "",
+                    "escp2_profile_used": "",
                 }
                 self._write_metadata(final_path, metadata)
                 if self.converter:

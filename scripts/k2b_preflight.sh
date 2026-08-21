@@ -170,8 +170,21 @@ section "Required userspace commands"
 for command_name in python3 openssl losetup mount umount sfdisk mkfs.vfat systemctl; do
   command_status "$command_name"
 done
-for command_name in gs ps2pdf gpcl6 pcl6; do
+for command_name in gs ps2pdf gpcl6 pcl6 xpstopdf gxps escapy; do
   command_status "$command_name"
+done
+for decoder_path in \
+  /usr/lib/cups/filter/pwgtopdf \
+  /usr/local/libexec/jvlei-prn-decoders/hbpldecode \
+  /usr/local/libexec/jvlei-prn-decoders/ddstdecode \
+  /usr/local/libexec/jvlei-prn-decoders/opldecode \
+  /usr/local/libexec/jvlei-prn-decoders/slxdecode \
+  /usr/local/libexec/jvlei-prn-decoders/brdecode; do
+  if [[ -x "$decoder_path" ]]; then
+    pass "isolated decoder available: $decoder_path"
+  else
+    printf '[INFO] isolated decoder not installed: %s\n' "$decoder_path"
+  fi
 done
 if command -v python3 >/dev/null 2>&1; then
   python3 --version

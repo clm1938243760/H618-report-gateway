@@ -1,0 +1,16 @@
+charset-normalizer==3.5.1 \
+    --hash=sha256:4582c27e8c889d64811987b5967fbd3ae0c823fe1fd933b543d55ac20bb475fa
+lark==1.2.2 \
+    --hash=sha256:c2276486b02f0f1b90be155f2c8ba4a8e194d42775786db622faccd652d8e80c
+numpy==2.2.6 \
+    --hash=sha256:f2618db89be1b4e05f7a1a847a9c1c0abd63e63a1607d892dd54668dd92faf87
+pillow==12.2.0 \
+    --hash=sha256:03e7e372d5240cc23e9f07deca4d775c0817bffc641b01e9c3af208dbd300987
+platformdirs==4.11.3 \
+    --hash=sha256:5ed065d443751de711da036041a7a214122efc4a4de393b3f4137ba5576540e7
+pyscape==1.1.0 \
+    --hash=sha256:4b79a85c9659cd13fbe00d7efded13212b95262ac0d922a18658d3efdc9465b7
+reportlab[accel]==4.5.1 \
+    --hash=sha256:06fce8cb56c83307cfa4909cdf4e6a2ddbb44e5d6ef4d2edca896d7e9769f091
+rl-accel==0.9.1 \
+    --hash=sha256:7e57ed3639fe3fcd2c7bb4f95317166272bfaf05fc24e3af74ba2099def8c4b2

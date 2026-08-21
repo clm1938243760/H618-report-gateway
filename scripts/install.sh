@@ -37,18 +37,92 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 python3-venv python3-yaml python3-pil python3-aiohttp \
-    dosfstools util-linux ghostscript openssl device-tree-compiler \
+    dosfstools util-linux ghostscript libgxps-utils openssl device-tree-compiler \
     network-manager dnsmasq-base iptables ipp-usb \
     cups cups-client cups-filters printer-driver-brlaser \
     printer-driver-pxljr printer-driver-foo2zjs \
     openprinting-ppds foomatic-db-compressed-ppds
 fi
 
+HBPL_DECODER="$SRC/third_party/foo2zjs-hbpl/bin/linux-arm64/hbpldecode"
+HBPL_DECODER_SHA256=25c2f178941f1f88bf5cfc87cdec36f05372ecbf7b8fd240ed00d2ce093251e5
+DDST_DECODER="$SRC/third_party/foo2zjs-ddst/bin/linux-arm64/ddstdecode"
+DDST_DECODER_SHA256=63f8154d45a1debd8c7ed68a1c23abaed1c18178cb3575ec490f0d5851646cd0
+OPL_DECODER="$SRC/third_party/foo2zjs-opl/bin/linux-arm64/opldecode"
+OPL_DECODER_SHA256=86061fb03f723d9f465bb2c777213455a4cdcbfdf2141d56526dca68a56030c0
+SLX_DECODER="$SRC/third_party/foo2zjs-slx/bin/linux-arm64/slxdecode"
+SLX_DECODER_SHA256=03eaa5afb30e78220f941aa7ee0b02224e2b4813d8504f2bc73167c1aa3b7665
+BRLASER_DECODER="$SRC/third_party/brlaser-brdecode/bin/linux-arm64/brdecode"
+BRLASER_DECODER_SHA256=48fc35456f4be5eb61014e6b584a336637ed28bdfbd66a25a6926a5a1ecf8d27
+if [[ "$(uname -m)" == "aarch64" ]]; then
+  ACTUAL_HBPL_SHA256="$(sha256sum "$HBPL_DECODER" | awk '{print $1}')"
+  if [[ "$ACTUAL_HBPL_SHA256" != "$HBPL_DECODER_SHA256" ]]; then
+    echo "ERROR: audited HBPL decoder SHA-256 mismatch" >&2
+    exit 1
+  fi
+  install -D -m 0755 "$HBPL_DECODER" /usr/local/libexec/jvlei-prn-decoders/hbpldecode
+
+  ACTUAL_DDST_SHA256="$(sha256sum "$DDST_DECODER" | awk '{print $1}')"
+  if [[ "$ACTUAL_DDST_SHA256" != "$DDST_DECODER_SHA256" ]]; then
+    echo "ERROR: audited DDST decoder SHA-256 mismatch" >&2
+    exit 1
+  fi
+  install -D -m 0755 "$DDST_DECODER" /usr/local/libexec/jvlei-prn-decoders/ddstdecode
+
+  ACTUAL_OPL_SHA256="$(sha256sum "$OPL_DECODER" | awk '{print $1}')"
+  if [[ "$ACTUAL_OPL_SHA256" != "$OPL_DECODER_SHA256" ]]; then
+    echo "ERROR: audited OPL decoder SHA-256 mismatch" >&2
+    exit 1
+  fi
+  install -D -m 0755 "$OPL_DECODER" /usr/local/libexec/jvlei-prn-decoders/opldecode
+
+  ACTUAL_SLX_SHA256="$(sha256sum "$SLX_DECODER" | awk '{print $1}')"
+  if [[ "$ACTUAL_SLX_SHA256" != "$SLX_DECODER_SHA256" ]]; then
+    echo "ERROR: audited SLX decoder SHA-256 mismatch" >&2
+    exit 1
+  fi
+  install -D -m 0755 "$SLX_DECODER" /usr/local/libexec/jvlei-prn-decoders/slxdecode
+
+  ACTUAL_BRLASER_SHA256="$(sha256sum "$BRLASER_DECODER" | awk '{print $1}')"
+  if [[ "$ACTUAL_BRLASER_SHA256" != "$BRLASER_DECODER_SHA256" ]]; then
+    echo "ERROR: audited Brother decoder SHA-256 mismatch" >&2
+    exit 1
+  fi
+  install -D -m 0755 "$BRLASER_DECODER" /usr/local/libexec/jvlei-prn-decoders/brdecode
+fi
+
 if ! command -v gpcl6 >/dev/null 2>&1 && ! command -v pcl6 >/dev/null 2>&1; then
   cat >&2 <<'EOF'
 WARNING: GhostPCL is not installed. MSC, PDF, PostScript, image and text handling
 will work, but raw PCL/PCL XL print jobs cannot be converted to PDF yet.
-Use scripts/build_ghostpcl.sh after reviewing the AGPL/commercial license terms.
+Install GhostPCL only through the separately reviewed internal-test procedure after
+reviewing the AGPL/commercial license terms. The helper is not shipped in production
+company update packages.
+EOF
+fi
+if ! command -v xpstopdf >/dev/null 2>&1 && ! command -v gxps >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+WARNING: No XPS converter is installed. XPS/OpenXPS jobs will be retained as
+PRN but cannot be converted to PDF. Install libgxps-utils or use the gxps
+fallback after reviewing the corresponding license terms.
+EOF
+fi
+if [[ ! -x /usr/lib/cups/filter/pwgtopdf ]]; then
+  cat >&2 <<'EOF'
+WARNING: /usr/lib/cups/filter/pwgtopdf is missing. CUPS/PWG Raster and Apple URF
+jobs will be identified and retained as PRN but cannot be converted to PDF. Install a
+cups-filters package that provides the standard CUPS filter.
+EOF
+fi
+ESCAPY_WHEELHOUSE="$SRC/third_party/escapy-arm64-wheelhouse"
+if ! command -v escapy >/dev/null 2>&1 && [[ -d $ESCAPY_WHEELHOUSE ]]; then
+  "$SRC/scripts/install_escapy.sh" --accept-agpl "$ESCAPY_WHEELHOUSE"
+fi
+if ! command -v escapy >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+WARNING: EscaPy is not installed. ESC/P and ESC/P2 jobs will be identified and
+retained as PRN but cannot be converted to PDF. EscaPy uses AGPL-3.0-or-later
+or a commercial license and must be reviewed and installed separately.
 EOF
 fi
 

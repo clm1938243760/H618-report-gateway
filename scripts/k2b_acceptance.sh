@@ -62,6 +62,52 @@ check_command() {
   fi
 }
 
+check_escapy_gateway_conversion() {
+  local output temp_dir
+  temp_dir="$(mktemp -d /tmp/jvlei-escapy-acceptance.XXXXXX)" || {
+    fail "cannot create the EscaPy acceptance directory"
+    return
+  }
+  if output=$(
+    PYTHONPATH="$ROOT/src" "$PYTHON" - "$temp_dir" <<'PY'
+import sys
+from pathlib import Path
+
+from gadget_msc_printer.config import PdfConfig
+from gadget_msc_printer.pdf_converter import PdfConverter
+
+root = Path(sys.argv[1])
+source = root / "gateway-escp.prn"
+source.write_bytes(
+    b"\x1b@\x1bP\x1b3\x18"
+    b"JVLEI ESC/P GATEWAY v0.81\r\n"
+    b"\x1b*\x00\x01\x00\x80\x0c\x1b@"
+)
+converter = PdfConverter(
+    PdfConfig(
+        output_dir=str(root / "pdf"),
+        escp_converters=["escapy"],
+        escp_pins=9,
+    )
+)
+result = converter.convert(source, "acceptance")
+if result is None:
+    raise SystemExit(converter.last_error or "gateway ESC/P conversion failed")
+print(result)
+PY
+  ); then
+    if command -v gs >/dev/null 2>&1 \
+      && gs -q -dNOPAUSE -dBATCH -sDEVICE=nullpage "$output"; then
+      pass "gateway PdfConverter completed the EscaPy PDF smoke test"
+    else
+      fail "EscaPy produced a PDF that Ghostscript could not validate"
+    fi
+  else
+    fail "gateway PdfConverter could not complete the EscaPy smoke test"
+  fi
+  rm -rf -- "$temp_dir"
+}
+
 [[ -r "$CONFIG" ]] || { echo "configuration is not readable: $CONFIG" >&2; exit 1; }
 
 PYTHON="$ROOT/.venv/bin/python"
@@ -235,14 +281,79 @@ fi
 
 check_command ps2pdf
 if command -v gpcl6 >/dev/null 2>&1 || command -v pcl6 >/dev/null 2>&1; then
-  pass "GhostPCL is available"
+  pass "GhostPCL is available for PCL/PCL XL/HP-GL/2"
 else
-  warn "GhostPCL is missing; PCL/PCL XL conversion is not ready"
+  warn "GhostPCL is missing; PCL/PCL XL/HP-GL/2 conversion is not ready"
 fi
-if command -v zjsdecode >/dev/null 2>&1; then
-  pass "ZjStream decoder is available"
+if command -v xpstopdf >/dev/null 2>&1; then
+  pass "libgxps xpstopdf is available"
+elif command -v gxps >/dev/null 2>&1; then
+  pass "GhostXPS is available as the XPS fallback"
 else
-  warn "zjsdecode is missing; ZjStream conversion is not ready"
+  warn "XPS converter is missing; XPS/OpenXPS conversion is not ready"
+fi
+if [[ -x /usr/lib/cups/filter/pwgtopdf ]]; then
+  pass "CUPS pwgtopdf is available for CUPS/PWG Raster and Apple URF"
+else
+  warn "pwgtopdf is missing; CUPS/PWG Raster and Apple URF conversion is not ready"
+fi
+if command -v escapy >/dev/null 2>&1; then
+  pass "EscaPy is available for ESC/P and ESC/P2"
+  for profile in generic xp410 sr800; do
+    if [[ -r "/etc/jvlei-escapy/$profile/escapy.conf" ]]; then
+      pass "EscaPy profile is installed: $profile"
+    else
+      fail "EscaPy profile is missing: $profile"
+    fi
+  done
+  check_escapy_gateway_conversion
+else
+  warn "EscaPy is not installed; ESC/P and ESC/P2 streams are retained only"
+fi
+for decoder in zjsdecode qpdldecode xqxdecode hipercdecode lavadecode oakdecode; do
+  if command -v "$decoder" >/dev/null 2>&1; then
+    pass "$decoder private raster decoder is available"
+  else
+    warn "$decoder is missing; the matching private print stream cannot be converted"
+  fi
+done
+if command -v gipddecode >/dev/null 2>&1; then
+  pass "gipddecode structure analyzer is available; GIPD PDF conversion remains disabled"
+else
+  warn "gipddecode is missing; GIPD streams can still be recognized and retained"
+fi
+if [[ -x /usr/local/libexec/jvlei-prn-decoders/ddstdecode ]]; then
+  pass "audited isolated ddstdecode is available"
+elif command -v ddstdecode >/dev/null 2>&1; then
+  warn "only the unsafe distro ddstdecode is installed; DDST conversion remains unavailable"
+else
+  warn "audited ddstdecode is missing; DDST streams are recognized and retained only"
+fi
+if [[ -x /usr/local/libexec/jvlei-prn-decoders/opldecode ]]; then
+  pass "audited isolated opldecode is available"
+elif command -v opldecode >/dev/null 2>&1; then
+  warn "only the unsafe distro opldecode is installed; OPL color conversion remains unavailable"
+else
+  warn "audited opldecode is missing; OPL streams are recognized and retained only"
+fi
+if [[ -x /usr/local/libexec/jvlei-prn-decoders/slxdecode ]]; then
+  pass "audited isolated slxdecode is available"
+elif command -v slxdecode >/dev/null 2>&1; then
+  warn "only the incomplete distro slxdecode is installed; SLX color conversion remains unavailable"
+else
+  warn "audited slxdecode is missing; SLX streams are recognized and retained only"
+fi
+if [[ -x /usr/local/libexec/jvlei-prn-decoders/hbpldecode ]]; then
+  pass "audited isolated hbpldecode is available"
+elif command -v hbpldecode >/dev/null 2>&1; then
+  warn "only the unsafe distro hbpldecode is installed; HBPL conversion remains unavailable"
+else
+  warn "audited hbpldecode is missing; HBPL streams are recognized and retained only"
+fi
+if [[ -x /usr/local/libexec/jvlei-prn-decoders/brdecode ]]; then
+  pass "audited isolated brdecode is available for Brother HBP/XL2HB"
+else
+  warn "audited brdecode is missing; Brother HBP/XL2HB streams are retained only"
 fi
 
 if command -v lpstat >/dev/null 2>&1 && systemctl is-active --quiet cups.service; then
